@@ -66,9 +66,14 @@ class MessageRecord:
 
 class LSNPState:
     def __init__(self):
-        self.peers: Dict[str, Peer] = {}
-        self.posts: List[MessageRecord] = []
-        self.dms: List[MessageRecord] = []
+        # Known peers by user_id
+        self.peers = {}
+        # Public posts we've seen
+        self.posts = []
+        # Direct messages tracked
+        self.dms = []
+        # Groups: group_id -> {'name': str, 'members': set[str]}
+        self.groups = {}
 
     def update_peer(self, user_id: str, display_name: str, status: str, 
                    avatar_type: str = None, avatar_encoding: str = None, avatar_data: str = None):
@@ -191,3 +196,42 @@ class LSNPState:
     def list_peers_with_avatars(self) -> List[Peer]:
         """Get list of peers that have avatars"""
         return [p for p in self.peers.values() if p.has_avatar]
+
+    # --- Groups ---
+    def create_or_update_group(self, group_id: str, *, name: str | None = None, members: List[str] | None = None):
+        g = self.groups.get(group_id)
+        if not g:
+            g = { 'name': name or group_id, 'members': set() }
+            self.groups[group_id] = g
+        if name:
+            g['name'] = name
+        if members is not None:
+            for m in members:
+                if m:
+                    g['members'].add(m)
+
+    def group_add_members(self, group_id: str, add: List[str]):
+        if group_id not in self.groups:
+            self.groups[group_id] = { 'name': group_id, 'members': set() }
+        for m in add:
+            if m:
+                self.groups[group_id]['members'].add(m)
+
+    def group_remove_members(self, group_id: str, remove: List[str]):
+        if group_id not in self.groups:
+            return
+        for m in remove:
+            self.groups[group_id]['members'].discard(m)
+
+    def list_groups_for_user(self, user_id: str) -> List[tuple[str, str]]:
+        out = []
+        for gid, g in self.groups.items():
+            if user_id in g['members']:
+                out.append((gid, g['name']))
+        return out
+
+    def list_group_members(self, group_id: str) -> List[str]:
+        g = self.groups.get(group_id)
+        if not g:
+            return []
+        return sorted(g['members'])

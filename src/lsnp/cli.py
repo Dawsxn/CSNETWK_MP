@@ -99,8 +99,8 @@ def main(argv=None):
     p_like.add_argument("post_timestamp", type=int, help="Post TIMESTAMP to react to")
     p_like.add_argument("--unlike", action="store_true", help="Send UNLIKE instead of LIKE")
 
-    p_show_cmd = sub.add_parser("show", help="Show peers/posts/dms once and exit")
-    p_show_cmd.add_argument("what", choices=["peers", "posts", "dms", "names", "user"], help="What to show")
+    p_show_cmd = sub.add_parser("show", help="Show peers/posts/dms/groups once and exit")
+    p_show_cmd.add_argument("what", choices=["peers", "posts", "dms", "names", "user", "groups", "members"], help="What to show")
     p_show_cmd.add_argument("who", nargs="?", help="For 'user': user_id or display name to filter by")
 
     # Tic-tac-toe commands
@@ -436,6 +436,24 @@ def main(argv=None):
                     print(f"  • {m.content} [{m.message_id}]")
             else:
                 print("- DMs: none")
+        elif args.what == "groups":
+            # Show groups we belong to
+            groups = node.state.list_groups_for_user(user_id)
+            if groups:
+                for gid, gname in groups:
+                    print(f"- {gname} ({gid})")
+            else:
+                print("No groups.")
+        elif args.what == "members":
+            if not args.who:
+                print("Provide a GROUP_ID: show members <group_id>")
+                return 1
+            members = node.state.list_group_members(args.who)
+            if members:
+                for m in members:
+                    print(f"- {m}")
+            else:
+                print("No such group or no members.")
         return 0
 
     # default: run (if args.cmd == "run" or no subcommand supplied)

@@ -25,6 +25,16 @@ REQUIRED_FIELDS = {
     "FILE_RECEIVED": [
         "TYPE", "FROM", "TO", "FILEID", "STATUS", "TIMESTAMP"
     ],
+    # Group messages per RFC
+    "GROUP_CREATE": [
+        "TYPE", "FROM", "GROUP_ID", "GROUP_NAME", "MEMBERS", "TIMESTAMP", "TOKEN"
+    ],
+    "GROUP_UPDATE": [
+        "TYPE", "FROM", "GROUP_ID", "TIMESTAMP", "TOKEN"
+    ],
+    "GROUP_MESSAGE": [
+        "TYPE", "FROM", "GROUP_ID", "CONTENT", "TIMESTAMP", "TOKEN"
+    ],
     "TICTACTOE_INVITE": ["TYPE", "FROM", "TO", "GAMEID", "MESSAGE_ID", "SYMBOL", "TIMESTAMP", "TOKEN"],
     "TICTACTOE_MOVE": ["TYPE", "FROM", "TO", "GAMEID", "MESSAGE_ID", "POSITION", "SYMBOL", "TURN", "TOKEN"],
     "TICTACTOE_RESULT": ["TYPE", "FROM", "TO", "GAMEID", "MESSAGE_ID", "RESULT", "SYMBOL", "TIMESTAMP"],
@@ -34,6 +44,7 @@ REQUIRED_FIELDS = {
 OPTIONAL_FIELDS = {
     "PROFILE": ["AVATAR_TYPE", "AVATAR_ENCODING", "AVATAR_DATA"],
     "FILE_OFFER": ["DESCRIPTION"],
+    "GROUP_UPDATE": ["ADD", "REMOVE"],
     "TICTACTOE_RESULT": ["WINNING_LINE"],
     "TICTACTOE_MOVE_RESPONSE": ["WINNER"],
 }
@@ -76,7 +87,7 @@ def parse_message(raw: str) -> ParsedMessage:
     if msg_type == "POST" and "TTL" not in kv:
         kv["TTL"] = str(config.DEFAULT_TTL)
     # Provide TIMESTAMP defaults for messages that commonly include them
-    if msg_type in ("DM", "TICTACTOE_INVITE", "TICTACTOE_RESULT", "LIKE", "FILE_OFFER", "FILE_RECEIVED") and "TIMESTAMP" not in kv:
+    if msg_type in ("DM", "TICTACTOE_INVITE", "TICTACTOE_RESULT", "LIKE", "FILE_OFFER", "FILE_RECEIVED", "GROUP_CREATE", "GROUP_UPDATE", "GROUP_MESSAGE") and "TIMESTAMP" not in kv:
         kv["TIMESTAMP"] = str(int(time.time()))
 
     # Light validation for M1

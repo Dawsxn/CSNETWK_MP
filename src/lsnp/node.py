@@ -212,6 +212,34 @@ class Node:
             self._handle_tictactoe_result(kv)
         elif t == "TICTACTOE_MOVE_RESPONSE":
             self._handle_tictactoe_move_response(kv)
+        elif t == "GROUP_CREATE":
+            gid = kv.get("GROUP_ID", "")
+            gname = kv.get("GROUP_NAME", gid)
+            members = [m for m in kv.get("MEMBERS", "").split(",") if m]
+            self.state.create_or_update_group(gid, name=gname, members=members)
+            if self.user_id in members:
+                self._log(f"You've been added to {gname}")
+        elif t == "GROUP_UPDATE":
+            gid = kv.get("GROUP_ID", "")
+            add = [m for m in kv.get("ADD", "").split(",") if m]
+            remove = [m for m in kv.get("REMOVE", "").split(",") if m]
+            if add:
+                self.state.group_add_members(gid, add)
+            if remove:
+                self.state.group_remove_members(gid, remove)
+            self._log(f'The group "{self.state.groups.get(gid, {}).get("name", gid)}" member list was updated.')
+        elif t == "GROUP_MESSAGE":
+            gid = kv.get("GROUP_ID", "")
+            content = kv.get("CONTENT", "")
+            from_user = kv.get("FROM", "")
+            # Only print incoming messages to groups we belong to
+            if from_user == self.user_id:
+                return
+            g = self.state.groups.get(gid)
+            if not g or self.user_id not in g.get('members', set()):
+                return
+            group_name = g.get('name', gid)
+            self._log(f"[GROUP:{group_name}] {from_user}: {content}")
         elif t == "FILE_OFFER":
             self._handle_file_offer(pm)
         elif t == "FILE_CHUNK":
