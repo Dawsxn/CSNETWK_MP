@@ -296,8 +296,22 @@ def main(argv=None):
 
     if args.cmd == "like":
         node.start()
+        # Proactively discover peers so display-name targets can resolve
+        node.send_ping()
+        time.sleep(1)
+
+        target = args.to
+        # If user passed a display name, resolve to user_id (name@ip)
+        if "@" not in target:
+            resolved = node.state.resolve_user_id(target)
+            if resolved:
+                target = resolved
+            else:
+                # leave as-is; may be a raw host/IP
+                pass
+
         action = "UNLIKE" if args.unlike else "LIKE"
-        node.send_like(to_user=args.to, post_timestamp=args.post_timestamp, action=action)
+        node.send_like(to_user=target, post_timestamp=args.post_timestamp, action=action)
         print(f"{action} sent.")
         time.sleep(1)
         node.stop()
@@ -307,7 +321,9 @@ def main(argv=None):
         # Start briefly to receive any messages for a short window
         node.start()
         try:
-            time.sleep(1)
+            # Actively solicit profiles so we see other peers
+            node.send_ping()
+            time.sleep(2)
         finally:
             node.stop()
 
