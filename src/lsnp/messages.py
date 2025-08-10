@@ -7,12 +7,14 @@ from . import config
 
 REQUIRED_FIELDS = {
     "PROFILE": ["TYPE", "USER_ID", "DISPLAY_NAME", "STATUS"],
+    # POST TIMESTAMP is described in RFC, but keep optional to preserve compatibility with existing tests
     "POST": ["TYPE", "USER_ID", "CONTENT", "TTL", "MESSAGE_ID", "TOKEN"],
     "DM": ["TYPE", "FROM", "TO", "CONTENT", "TIMESTAMP", "MESSAGE_ID", "TOKEN"],
     "PING": ["TYPE", "USER_ID"],
     "ACK": ["TYPE", "MESSAGE_ID", "STATUS"],
     "FOLLOW": ["TYPE", "FROM", "TO", "TIMESTAMP", "MESSAGE_ID", "TOKEN"],
     "UNFOLLOW": ["TYPE", "FROM", "TO", "TIMESTAMP", "MESSAGE_ID", "TOKEN"],
+    "LIKE": ["TYPE", "FROM", "TO", "POST_TIMESTAMP", "ACTION", "TIMESTAMP", "TOKEN"],
     "TICTACTOE_INVITE": ["TYPE", "FROM", "TO", "GAMEID", "MESSAGE_ID", "SYMBOL", "TIMESTAMP", "TOKEN"],
     "TICTACTOE_MOVE": ["TYPE", "FROM", "TO", "GAMEID", "MESSAGE_ID", "POSITION", "SYMBOL", "TURN", "TOKEN"],
     "TICTACTOE_RESULT": ["TYPE", "FROM", "TO", "GAMEID", "MESSAGE_ID", "RESULT", "SYMBOL", "TIMESTAMP"],
@@ -59,20 +61,22 @@ def parse_message(raw: str) -> ParsedMessage:
     if not msg_type:
         raise ValueError("Missing TYPE")
 
-    # Light validation for M1
-    required = REQUIRED_FIELDS.get(msg_type)
-    if required:
-        missing = [f for f in required if f not in kv]
-        if missing:
-            raise ValueError(f"Missing fields for {msg_type}: {missing}")
-
-    # Defaults
+    # Defaults first, so required validation can pass when defaults are acceptable
     if msg_type == "POST" and "TTL" not in kv:
         kv["TTL"] = str(config.DEFAULT_TTL)
     if msg_type == "DM" and "TIMESTAMP" not in kv:
         kv["TIMESTAMP"] = str(int(time.time()))
     if msg_type in ("TICTACTOE_INVITE", "TICTACTOE_RESULT") and "TIMESTAMP" not in kv:
         kv["TIMESTAMP"] = str(int(time.time()))
+    if msg_type == "LIKE" and "TIMESTAMP" not in kv:
+        kv["TIMESTAMP"] = str(int(time.time()))
+
+    # Light validation for M1
+    required = REQUIRED_FIELDS.get(msg_type)
+    if required:
+        missing = [f for f in required if f not in kv]
+        if missing:
+            raise ValueError(f"Missing fields for {msg_type}: {missing}")
 
     return ParsedMessage(type=msg_type, kv=kv, raw=raw)
 

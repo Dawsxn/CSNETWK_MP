@@ -85,6 +85,11 @@ def main(argv=None):
     p_unfollow = sub.add_parser("unfollow", help="Unfollow a user")
     p_unfollow.add_argument("to", help="Destination user_id or host/ip")
 
+    p_like = sub.add_parser("like", help="Like or unlike a user's post")
+    p_like.add_argument("to", help="Post author's user_id or host/ip")
+    p_like.add_argument("post_timestamp", type=int, help="Post TIMESTAMP to react to")
+    p_like.add_argument("--unlike", action="store_true", help="Send UNLIKE instead of LIKE")
+
     p_show_cmd = sub.add_parser("show", help="Show peers/posts/dms once and exit")
     p_show_cmd.add_argument("what", choices=["peers", "posts", "dms", "names", "user"], help="What to show")
     p_show_cmd.add_argument("who", nargs="?", help="For 'user': user_id or display name to filter by")
@@ -289,6 +294,15 @@ def main(argv=None):
         node.stop()
         return 0
 
+    if args.cmd == "like":
+        node.start()
+        action = "UNLIKE" if args.unlike else "LIKE"
+        node.send_like(to_user=args.to, post_timestamp=args.post_timestamp, action=action)
+        print(f"{action} sent.")
+        time.sleep(1)
+        node.stop()
+        return 0
+
     if args.cmd == "show":
         # Start briefly to receive any messages for a short window
         node.start()
@@ -321,7 +335,7 @@ def main(argv=None):
                         name_with_pfp = peer.display_name + (" [PFP]" if peer.has_avatar else "")
                     else:
                         name_with_pfp = m.user_id
-                    print(f"- {name_with_pfp}: {m.content} [{m.message_id}]")
+                    print(f"- {name_with_pfp}: {m.content} [ts={int(m.timestamp)} id={m.message_id}]")
             else:
                 print("No posts found.")
         elif args.what == "dms":  # dms
@@ -352,7 +366,7 @@ def main(argv=None):
             if posts:
                 print("- Posts:")
                 for m in posts:
-                    print(f"  • {m.content} [{m.message_id}]")
+                    print(f"  • {m.content} [ts={int(m.timestamp)} id={m.message_id}]")
             else:
                 print("- Posts: none")
             if dms:

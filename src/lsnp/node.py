@@ -54,6 +54,10 @@ class Node:
     def _log_verbose_message(self, pm: messages.ParsedMessage):
         """Log the full message details in verbose mode"""
         if self.verbose:
+            # Header with time, sender and type
+            ts = int(time.time())
+            sender = pm.addr[0] if pm.addr else "?"
+            print(f"RECV < [{ts}] from {sender} type={pm.type}")
             # Format the message in a readable way, showing all fields
             formatted_msg = []
             for key, value in pm.kv.items():
@@ -64,8 +68,42 @@ class Node:
                     formatted_msg.append(f"{key}: {value}")
             
             full_msg = "\n".join(formatted_msg)
-            print(f"[RECEIVED] Full message:\n{full_msg}")
+            print(full_msg)
             print("-" * 40)  # separator line
+
+    def _log_verbose_send(self, kv: dict, dest: str):
+        if not self.verbose:
+            return
+        ts = int(time.time())
+        mtype = kv.get("TYPE", "?")
+        print(f"SEND > [{ts}] to {dest} type={mtype}")
+        try:
+            # keep it short
+            keys = [k for k in kv.keys() if k != "AVATAR_DATA"]
+            preview = ", ".join(f"{k}={kv[k]}" for k in keys[:5])
+            print(f"  {preview}")
+        except Exception:
+            pass
+
+    def _validate_token(self, kv: dict, expected_scope: str) -> tuple[bool, str]:
+        token = kv.get("TOKEN", "")
+        if not token:
+            return False, "missing-token"
+        parts = token.split("|")
+        if len(parts) != 3:
+            return False, "malformed-token"
+        _user, ts_str, scope = parts
+        try:
+            expiry = int(ts_str)
+        except ValueError:
+            return False, "invalid-expiry"
+        now = int(time.time())
+        if expiry < now:
+            return False, "expired"
+        if scope != expected_scope:
+            return False, f"scope-mismatch(expected={expected_scope}, got={scope})"
+        # Revocation list not implemented
+        return True, "ok"
 
     def _on_udp(self, data: bytes, addr: Tuple[str, int]):
         try:
@@ -120,14 +158,22 @@ class Node:
                 self._log_verbose(f"          Avatar details: {avatar_type}, ~{avatar_size_kb}KB")
             
         elif t == "POST":
-            # Determine expiry using TTL relative to now (no TIMESTAMP field defined for POST in RFC body)
+            # Determine expiry using TTL relative to the POST timestamp
             try:
                 ttl = int(kv.get("TTL", str(config.DEFAULT_TTL)))
             except ValueError:
                 ttl = config.DEFAULT_TTL
-            now_ts = time.time()
-            expires_at = now_ts + max(0, ttl)
-            self.state.add_post(kv["USER_ID"], kv.get("CONTENT", ""), kv.get("MESSAGE_ID", ""), timestamp=now_ts, expires_at=expires_at)
+            try:
+                ts = float(kv.get("TIMESTAMP", str(int(time.time()))))
+            except ValueError:
+                ts = time.time()
+            expires_at = ts + max(0, ttl)
+            self.state.add_post(
+                kv["USER_ID"], kv.get("CONTENT", ""), kv.get("MESSAGE_ID", ""), timestamp=ts, expires_at=expires_at
+            )
+            if self.verbose:
+                ok, reason = self._validate_token(kv, expected_scope="broadcast")
+                self._log_verbose(f"[TOKEN] POST {('valid' if ok else 'invalid')} ({reason})")
             peer = self.state.peers.get(kv["USER_ID"])
             if peer:
                 name_with_pfp = peer.display_name + (" [PFP]" if peer.has_avatar else "")
@@ -151,6 +197,9 @@ class Node:
                     except ValueError:
                         expires_at = None
             self.state.add_dm(kv["FROM"], kv.get("CONTENT", ""), kv.get("MESSAGE_ID", ""), timestamp=ts, expires_at=expires_at)
+            if self.verbose:
+                ok, reason = self._validate_token(kv, expected_scope="chat")
+                self._log_verbose(f"[TOKEN] DM {('valid' if ok else 'invalid')} ({reason})")
             peer = self.state.peers.get(kv["FROM"])
             if peer:
                 name_with_pfp = peer.display_name + (" [PFP]" if peer.has_avatar else "")
@@ -174,6 +223,28 @@ class Node:
             verb = "followed" if t == "FOLLOW" else "unfollowed"
             # Always show FOLLOW/UNFOLLOW messages
             self._log(f"[INFO] User {actor} has {verb} you")
+        elif t == "LIKE":
+            # Non-verbose printing guidance in RFC: show who liked your post
+            actor = kv.get("FROM", "")
+            action = kv.get("ACTION", "LIKE").upper()
+            post_ts = kv.get("POST_TIMESTAMP", "")
+            if self.verbose:
+                ok, reason = self._validate_token(kv, expected_scope="broadcast")
+                self._log_verbose(f"[TOKEN] LIKE {('valid' if ok else 'invalid')} ({reason})")
+            extra = ""
+            try:
+                pt = int(post_ts)
+                # Try to find our own post content to show short context
+                post = self.state.find_post_by_user_and_timestamp(self.user_id, pt)
+                if post and post.content:
+                    snippet = post.content[:30]
+                    extra = f" — \"{snippet}\""
+            except Exception:
+                pass
+            if action == "LIKE":
+                self._log(f"[INFO] {actor} likes your post{extra} (ts={post_ts})")
+            elif action == "UNLIKE":
+                self._log(f"[INFO] {actor} unliked your post{extra} (ts={post_ts})")
         elif t == "TICTACTOE_INVITE":
             self._handle_tictactoe_invite(kv)
         elif t == "TICTACTOE_MOVE":
@@ -360,14 +431,13 @@ class Node:
             "DISPLAY_NAME": self.display_name,
             "STATUS": self.status,
         }
-        
         # Add avatar fields if we have avatar data
         if self.avatar_data:
             kv["AVATAR_TYPE"] = self.avatar_data.get("type", "")
             kv["AVATAR_ENCODING"] = self.avatar_data.get("encoding", "")
             kv["AVATAR_DATA"] = self.avatar_data.get("data", "")
-        
         data = messages.format_message(kv).encode(config.ENCODING)
+        self._log_verbose_send(kv, dest="broadcast")
         self.udp.send_broadcast(data)
 
     def _send_profile_unicast(self, host: str):
@@ -377,17 +447,16 @@ class Node:
             "DISPLAY_NAME": self.display_name,
             "STATUS": self.status,
         }
-        
-        # Add avatar fields if we have avatar data
         if self.avatar_data:
             kv["AVATAR_TYPE"] = self.avatar_data.get("type", "")
             kv["AVATAR_ENCODING"] = self.avatar_data.get("encoding", "")
             kv["AVATAR_DATA"] = self.avatar_data.get("data", "")
-        
         data = messages.format_message(kv).encode(config.ENCODING)
+        self._log_verbose_send(kv, dest=host)
         self.udp.send_unicast(data, host=host)
 
     def send_post(self, content: str, message_id: str, token: str, ttl: int | None = None):
+        now_ts = int(time.time())
         kv = {
             "TYPE": "POST",
             "USER_ID": self.user_id,
@@ -395,25 +464,32 @@ class Node:
             "TTL": str(ttl if ttl is not None else config.DEFAULT_TTL),
             "MESSAGE_ID": message_id,
             "TOKEN": token,
+            "TIMESTAMP": str(now_ts),
         }
-        self.udp.send_broadcast(messages.format_message(kv).encode(config.ENCODING))
+        payload = messages.format_message(kv).encode(config.ENCODING)
+        self._log_verbose_send(kv, dest="broadcast")
+        self.udp.send_broadcast(payload)
 
     def send_dm(self, to_user_host: str, content: str, message_id: str, token: str):
-        # to_user_host is host/ip from user_id or discovered addr; for M1, accept host string
         kv = {
             "TYPE": "DM",
             "FROM": self.user_id,
-            "TO": to_user_host,  # simplification
+            "TO": to_user_host,
             "CONTENT": content,
             "TIMESTAMP": str(int(time.time())),
             "MESSAGE_ID": message_id,
             "TOKEN": token,
         }
-        self.udp.send_unicast(messages.format_message(kv).encode(config.ENCODING), host=to_user_host.split("@")[-1] if "@" in to_user_host else to_user_host)
+        payload = messages.format_message(kv).encode(config.ENCODING)
+        host = to_user_host.split("@")[-1] if "@" in to_user_host else to_user_host
+        self._log_verbose_send(kv, dest=host)
+        self.udp.send_unicast(payload, host=host)
 
     def send_ping(self):
         kv = {"TYPE": "PING", "USER_ID": self.user_id}
-        self.udp.send_broadcast(messages.format_message(kv).encode(config.ENCODING))
+        payload = messages.format_message(kv).encode(config.ENCODING)
+        self._log_verbose_send(kv, dest="broadcast")
+        self.udp.send_broadcast(payload)
 
     def send_follow(self, to_user_host: str, message_id: str, token: str):
         kv = {
@@ -425,7 +501,9 @@ class Node:
             "TOKEN": token,
         }
         host = to_user_host.split("@")[-1] if "@" in to_user_host else to_user_host
-        self.udp.send_unicast(messages.format_message(kv).encode(config.ENCODING), host=host)
+        payload = messages.format_message(kv).encode(config.ENCODING)
+        self._log_verbose_send(kv, dest=host)
+        self.udp.send_unicast(payload, host=host)
 
     def send_unfollow(self, to_user_host: str, message_id: str, token: str):
         kv = {
@@ -437,10 +515,11 @@ class Node:
             "TOKEN": token,
         }
         host = to_user_host.split("@")[-1] if "@" in to_user_host else to_user_host
-        self.udp.send_unicast(messages.format_message(kv).encode(config.ENCODING), host=host)
+        payload = messages.format_message(kv).encode(config.ENCODING)
+        self._log_verbose_send(kv, dest=host)
+        self.udp.send_unicast(payload, host=host)
 
     def send_tictactoe_invite(self, to_user_host: str, game_id: str, symbol: str, message_id: str, token: str):
-        """Send tic-tac-toe game invitation"""
         kv = {
             "TYPE": "TICTACTOE_INVITE",
             "FROM": self.user_id,
@@ -452,10 +531,11 @@ class Node:
             "TOKEN": token,
         }
         host = to_user_host.split("@")[-1] if "@" in to_user_host else to_user_host
-        self.udp.send_unicast(messages.format_message(kv).encode(config.ENCODING), host=host)
+        payload = messages.format_message(kv).encode(config.ENCODING)
+        self._log_verbose_send(kv, dest=host)
+        self.udp.send_unicast(payload, host=host)
 
     def send_tictactoe_move(self, to_user_host: str, game_id: str, position: int, symbol: str, turn: int, message_id: str, token: str):
-        """Send tic-tac-toe move"""
         kv = {
             "TYPE": "TICTACTOE_MOVE",
             "FROM": self.user_id,
@@ -468,10 +548,11 @@ class Node:
             "TOKEN": token,
         }
         host = to_user_host.split("@")[-1] if "@" in to_user_host else to_user_host
-        self.udp.send_unicast(messages.format_message(kv).encode(config.ENCODING), host=host)
+        payload = messages.format_message(kv).encode(config.ENCODING)
+        self._log_verbose_send(kv, dest=host)
+        self.udp.send_unicast(payload, host=host)
 
     def send_tictactoe_result(self, game_id: str, to_user: str, result: str, symbol: str, winning_line: list = None):
-        """Send tic-tac-toe game result"""
         kv = {
             "TYPE": "TICTACTOE_RESULT",
             "FROM": self.user_id,
@@ -482,12 +563,27 @@ class Node:
             "SYMBOL": symbol,
             "TIMESTAMP": str(int(time.time())),
         }
-        
         if winning_line:
             kv["WINNING_LINE"] = ",".join(map(str, winning_line))
-        
         host = to_user.split("@")[-1] if "@" in to_user else to_user
         self.udp.send_unicast(messages.format_message(kv).encode(config.ENCODING), host=host)
+
+    def send_like(self, to_user: str, post_timestamp: int, action: str = "LIKE"):
+        expiry = int(time.time()) + config.DEFAULT_TTL
+        token = f"{self.user_id}|{expiry}|broadcast"
+        kv = {
+            "TYPE": "LIKE",
+            "FROM": self.user_id,
+            "TO": to_user,
+            "POST_TIMESTAMP": str(int(post_timestamp)),
+            "ACTION": action.upper(),
+            "TIMESTAMP": str(int(time.time())),
+            "TOKEN": token,
+        }
+        host = to_user.split("@")[-1] if "@" in to_user else to_user
+        payload = messages.format_message(kv).encode(config.ENCODING)
+        self._log_verbose_send(kv, dest=host)
+        self.udp.send_unicast(payload, host=host)
 
     # background presence loop (RFC: every 300s)
     def _presence_loop(self):
@@ -496,7 +592,6 @@ class Node:
             self._presence_stop.wait(timeout=1.0)
             now = time.time()
             if now - last_tick >= config.PRESENCE_INTERVAL:
-                # Default to PING unless a PROFILE is needed in this interval
                 if now - self._last_profile_sent >= config.PRESENCE_INTERVAL:
                     self.broadcast_profile()
                     self._last_profile_sent = now

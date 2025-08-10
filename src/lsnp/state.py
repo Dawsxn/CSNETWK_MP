@@ -172,6 +172,16 @@ class LSNPState:
             if peer.display_name.lower() == qlower:
                 return uid
         return None
+
+    def find_post_by_user_and_timestamp(self, user_id: str, post_timestamp: int) -> Optional[MessageRecord]:
+        """Find a post authored by user_id with given integer timestamp (seconds)."""
+        for m in self.posts:
+            try:
+                if m.user_id == user_id and int(m.timestamp) == int(post_timestamp):
+                    return m
+            except Exception:
+                continue
+        return None
     
     def get_peer_avatar(self, user_id: str) -> Optional[AvatarData]:
         """Get avatar data for a specific peer"""
