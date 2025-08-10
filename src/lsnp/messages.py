@@ -25,6 +25,10 @@ REQUIRED_FIELDS = {
     "FILE_RECEIVED": [
         "TYPE", "FROM", "TO", "FILEID", "STATUS", "TIMESTAMP"
     ],
+    # Revocation
+    "REVOKE": [
+        "TYPE", "TOKEN"
+    ],
     # Group messages per RFC
     "GROUP_CREATE": [
         "TYPE", "FROM", "GROUP_ID", "GROUP_NAME", "MEMBERS", "TIMESTAMP", "TOKEN"

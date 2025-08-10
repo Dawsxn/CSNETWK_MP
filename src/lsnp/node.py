@@ -3,6 +3,7 @@ import socket
 import threading
 import time
 from typing import Tuple, Optional, Dict
+import os
 
 from . import config, messages, transport, state as store
 from .tictactoe import TicTacToeManager
@@ -25,12 +26,12 @@ class Node:
         self._presence_thread = None
         self._presence_stop = threading.Event()
         self._last_profile_sent = 0.0
-        # file transfer buffers: file_id -> {
-        #   'from': uid, 'to': uid, 'filename': str, 'filesize': int,
-        #   'filetype': str, 'total_chunks': int|None, 'chunks': dict[int, bytes],
-        #   'received_count': int, 'save_path': Optional[str]
-        # }
-        self._file_buffers = {}
+    # file transfer buffers: file_id -> {
+    #   'from': uid, 'to': uid, 'filename': str, 'filesize': int,
+    #   'filetype': str, 'total_chunks': int|None, 'chunks': dict[int, bytes],
+    #   'received_count': int, 'save_path': Optional[str]
+    # }
+        
 
     def start(self):
         self.udp.start()
@@ -124,8 +125,10 @@ class Node:
             if self.verbose and avatar_type and avatar_data:
                 avatar_size_kb = len(avatar_data) * 3 // 4 // 1024  # rough base64 to bytes conversion
                 self._log_verbose(f"          Avatar details: {avatar_type}, ~{avatar_size_kb}KB")
-            
         elif t == "POST":
+            # Validate token (expiry, scope)
+            if not self._validate_token(kv.get("TOKEN", ""), required_scope="broadcast"):
+                return
             # Determine expiry using TTL relative to the POST timestamp
             try:
                 ttl = int(kv.get("TTL", str(config.DEFAULT_TTL)))
@@ -144,9 +147,14 @@ class Node:
                 name_with_pfp = peer.display_name + (" [PFP]" if peer.has_avatar else "")
             else:
                 name_with_pfp = kv["USER_ID"]
-            # Always show POST messages with PFP indicator
-            self._log(f"[POST] {name_with_pfp}: {kv.get('CONTENT','')}")
+            # Enforce follower-only display per RFC: only show if we follow the author or it's our own
+            if kv.get("USER_ID") == self.user_id or self.state.is_following(kv.get("USER_ID", "")):
+                self._log(f"[POST] {name_with_pfp}: {kv.get('CONTENT','')}")
+            # Record as a valid-token message regardless of printing
+            self.state.record_valid_token_message("POST", kv.get("TOKEN", ""), ts)
         elif t == "DM":
+            if not self._validate_token(kv.get("TOKEN", ""), required_scope="chat"):
+                return
             # Use provided TIMESTAMP if present; compute expiry from token timestamp
             try:
                 ts = float(kv.get("TIMESTAMP", str(int(time.time()))))
@@ -169,6 +177,7 @@ class Node:
                 name_with_pfp = kv["FROM"]
             # Always show DM messages with PFP indicator
             self._log(f"[DM] {name_with_pfp}: {kv.get('CONTENT','')}")
+            self.state.record_valid_token_message("DM", kv.get("TOKEN", ""), ts)
         elif t == "PING":
             # Only show in verbose mode; reply with PROFILE to the sender host (unicast)
             self._log_verbose(f"[PING] from {kv.get('USER_ID', 'unknown')}")
@@ -181,11 +190,21 @@ class Node:
         elif t == "ACK":
             self._log_verbose(f"[ACK] {kv.get('MESSAGE_ID', 'unknown')} - {kv.get('STATUS', 'unknown')}")
         elif t in ("FOLLOW", "UNFOLLOW"):
+            if not self._validate_token(kv.get("TOKEN", ""), required_scope="follow"):
+                return
             actor = kv.get("FROM", "")
             verb = "followed" if t == "FOLLOW" else "unfollowed"
             # Always show FOLLOW/UNFOLLOW messages
             self._log(f"[INFO] User {actor} has {verb} you")
+            # Update social graph
+            if t == "FOLLOW":
+                self.state.add_follower(actor)
+            else:
+                self.state.remove_follower(actor)
+            self.state.record_valid_token_message(t, kv.get("TOKEN", ""), float(kv.get("TIMESTAMP", time.time())))
         elif t == "LIKE":
+            if not self._validate_token(kv.get("TOKEN", ""), required_scope="broadcast"):
+                return
             # Non-verbose printing guidance in RFC: show who liked your post
             actor = kv.get("FROM", "")
             action = kv.get("ACTION", "LIKE").upper()
@@ -204,6 +223,7 @@ class Node:
                 self._log(f"[INFO] {actor} likes your post{extra} (ts={post_ts})")
             elif action == "UNLIKE":
                 self._log(f"[INFO] {actor} unliked your post{extra} (ts={post_ts})")
+            self.state.record_valid_token_message("LIKE", kv.get("TOKEN", ""), float(kv.get("TIMESTAMP", time.time())))
         elif t == "TICTACTOE_INVITE":
             self._handle_tictactoe_invite(kv)
         elif t == "TICTACTOE_MOVE":
@@ -213,22 +233,45 @@ class Node:
         elif t == "TICTACTOE_MOVE_RESPONSE":
             self._handle_tictactoe_move_response(kv)
         elif t == "GROUP_CREATE":
+            if not self._validate_token(kv.get("TOKEN", ""), required_scope="group"):
+                return
             gid = kv.get("GROUP_ID", "")
             gname = kv.get("GROUP_NAME", gid)
             members = [m for m in kv.get("MEMBERS", "").split(",") if m]
             self.state.create_or_update_group(gid, name=gname, members=members)
             if self.user_id in members:
                 self._log(f"You've been added to {gname}")
+            # record
+            try:
+                ts_val = float(kv.get("TIMESTAMP", time.time()))
+            except Exception:
+                ts_val = time.time()
+            self.state.record_valid_token_message("GROUP_CREATE", kv.get("TOKEN", ""), ts_val)
         elif t == "GROUP_UPDATE":
+            if not self._validate_token(kv.get("TOKEN", ""), required_scope="group"):
+                return
             gid = kv.get("GROUP_ID", "")
             add = [m for m in kv.get("ADD", "").split(",") if m]
             remove = [m for m in kv.get("REMOVE", "").split(",") if m]
+            # Only apply updates if we are already a member or being added now
+            current = self.state.groups.get(gid)
+            am_member = bool(current and self.user_id in current.get('members', set()))
+            if not am_member and self.user_id not in set(add):
+                return
             if add:
                 self.state.group_add_members(gid, add)
             if remove:
                 self.state.group_remove_members(gid, remove)
             self._log(f'The group "{self.state.groups.get(gid, {}).get("name", gid)}" member list was updated.')
+            # record
+            try:
+                ts_val = float(kv.get("TIMESTAMP", time.time()))
+            except Exception:
+                ts_val = time.time()
+            self.state.record_valid_token_message("GROUP_UPDATE", kv.get("TOKEN", ""), ts_val)
         elif t == "GROUP_MESSAGE":
+            if not self._validate_token(kv.get("TOKEN", ""), required_scope="group"):
+                return
             gid = kv.get("GROUP_ID", "")
             content = kv.get("CONTENT", "")
             from_user = kv.get("FROM", "")
@@ -238,17 +281,69 @@ class Node:
             g = self.state.groups.get(gid)
             if not g or self.user_id not in g.get('members', set()):
                 return
-            group_name = g.get('name', gid)
-            self._log(f"[GROUP:{group_name}] {from_user}: {content}")
+            # RFC non-verbose printing: "bob@... sent \"...\""
+            self._log(f"{from_user} sent \"{content}\"")
+            # record
+            try:
+                ts_val = float(kv.get("TIMESTAMP", time.time()))
+            except Exception:
+                ts_val = time.time()
+            self.state.record_valid_token_message("GROUP_MESSAGE", kv.get("TOKEN", ""), ts_val)
         elif t == "FILE_OFFER":
+            if not self._validate_token(kv.get("TOKEN", ""), required_scope="file"):
+                return
+            # Ensure this offer is addressed to us
+            to_field = kv.get("TO", "")
+            if to_field and to_field != self.user_id:
+                return
             self._handle_file_offer(pm)
+            # record valid token
+            try:
+                ts_val = float(kv.get("TIMESTAMP", time.time()))
+            except Exception:
+                ts_val = time.time()
+            self.state.record_valid_token_message("FILE_OFFER", kv.get("TOKEN", ""), ts_val)
         elif t == "FILE_CHUNK":
+            # Validate token and target before accepting chunk
+            if not self._validate_token(kv.get("TOKEN", ""), required_scope="file"):
+                return
+            to_field = kv.get("TO", "")
+            if to_field and to_field != self.user_id:
+                return
+            # Drop if this file was declined
+            if kv.get("FILEID", "") in self._declined_files:
+                return
             self._handle_file_chunk(pm)
+            # record valid token
+            self.state.record_valid_token_message("FILE_CHUNK", kv.get("TOKEN", ""), float(time.time()))
         elif t == "FILE_RECEIVED":
             # Silent in non-verbose mode per RFC
             self._log_verbose(f"[FILE_RECEIVED] {kv.get('FILEID','')} status={kv.get('STATUS','')}")
+        elif t == "REVOKE":
+            tok = kv.get("TOKEN", "")
+            if tok:
+                self.state.revoke_token(tok)
         else:
             self._log_verbose(f"[UNKNOWN] {t}")
+
+    # --- Token validation ---
+    def _validate_token(self, token: str, required_scope: str) -> bool:
+        if not token or not messages.is_token_like(token):
+            return False
+        if self.state.is_revoked(token):
+            return False
+        try:
+            user, ts_str, scope = token.split("|", 3)
+            expiry = int(ts_str)
+        except Exception:
+            return False
+        # Expiry check
+        if time.time() > expiry:
+            return False
+        # Scope check (exact match as per RFC)
+        if scope != required_scope:
+            return False
+        return True
 
     def _handle_tictactoe_move(self, kv: dict):
         """Handle incoming tic-tac-toe move"""
@@ -532,18 +627,22 @@ class Node:
         filesize = int(kv.get("FILESIZE", "0") or 0)
         filetype = kv.get("FILETYPE", "application/octet-stream")
         desc = kv.get("DESCRIPTION", "")
-        # Prepare buffer but don't auto-accept/deny; RFC says prompt user. In this CLI app, we accept by default.
-        self._file_buffers[file_id] = {
-            'from': from_uid,
-            'to': kv.get("TO", ""),
-            'filename': filename,
-            'filesize': filesize,
-            'filetype': filetype,
-            'total_chunks': None,
-            'chunks': {},
-            'received_count': 0,
-            'save_path': None,
-        }
+        # Respect auto-accept policy; if disabled, mark declined
+        if not self.file_auto_accept:
+            self._declined_files.add(file_id)
+        else:
+            # Prepare buffer to accept chunks
+            self._file_buffers[file_id] = {
+                'from': from_uid,
+                'to': kv.get("TO", ""),
+                'filename': filename,
+                'filesize': filesize,
+                'filetype': filetype,
+                'total_chunks': None,
+                'chunks': {},
+                'received_count': 0,
+                'save_path': None,
+            }
         # Non-verbose print: prompt-like message
         self._log(f"[INFO] {from_uid} is sending you a file do you accept? ({filename}, {filesize} bytes)")
 

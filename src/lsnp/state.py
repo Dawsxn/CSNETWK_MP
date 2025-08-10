@@ -74,6 +74,12 @@ class LSNPState:
         self.dms = []
         # Groups: group_id -> {'name': str, 'members': set[str]}
         self.groups = {}
+        # Social graph
+        self.following = set()   # user_ids we follow
+        self.followers = set()   # user_ids following us
+        # Token management
+        self.revoked_tokens = set()
+        self.valid_token_messages = []  # store raw or (type, token, ts)
 
     def update_peer(self, user_id: str, display_name: str, status: str, 
                    avatar_type: str = None, avatar_encoding: str = None, avatar_data: str = None):
@@ -196,6 +202,32 @@ class LSNPState:
     def list_peers_with_avatars(self) -> List[Peer]:
         """Get list of peers that have avatars"""
         return [p for p in self.peers.values() if p.has_avatar]
+
+    # --- Social graph helpers ---
+    def follow_user(self, user_id: str):
+        self.following.add(user_id)
+
+    def unfollow_user(self, user_id: str):
+        self.following.discard(user_id)
+
+    def add_follower(self, user_id: str):
+        self.followers.add(user_id)
+
+    def remove_follower(self, user_id: str):
+        self.followers.discard(user_id)
+
+    def is_following(self, user_id: str) -> bool:
+        return user_id in self.following
+
+    # --- Token helpers ---
+    def revoke_token(self, token: str):
+        self.revoked_tokens.add(token)
+
+    def is_revoked(self, token: str) -> bool:
+        return token in self.revoked_tokens
+
+    def record_valid_token_message(self, msg_type: str, token: str, timestamp: float):
+        self.valid_token_messages.append((msg_type, token, timestamp))
 
     # --- Groups ---
     def create_or_update_group(self, group_id: str, *, name: str | None = None, members: List[str] | None = None):
