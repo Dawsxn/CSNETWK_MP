@@ -2,17 +2,19 @@ from __future__ import annotations
 import socket
 import threading
 import time
-from typing import Tuple
+from typing import Tuple, Optional, Dict
 
 from . import config, messages, transport, state as store
 from .tictactoe import TicTacToeManager
 
 
 class Node:
-    def __init__(self, user_id: str, display_name: str, status: str = "Exploring LSNP!", verbose: bool = True):
+    def __init__(self, user_id: str, display_name: str, status: str = "Exploring LSNP!", 
+                 avatar_data: Optional[Dict[str, str]] = None, verbose: bool = True):
         self.user_id = user_id
         self.display_name = display_name
         self.status = status
+        self.avatar_data = avatar_data  # Dict with 'type', 'encoding', 'data' keys
         self.verbose = verbose
         self.state = store.LSNPState()
         self.tictactoe = TicTacToeManager()
@@ -55,7 +57,11 @@ class Node:
             # Format the message in a readable way, showing all fields
             formatted_msg = []
             for key, value in pm.kv.items():
-                formatted_msg.append(f"{key}: {value}")
+                # Truncate avatar data for readability
+                if key == "AVATAR_DATA" and len(value) > 50:
+                    formatted_msg.append(f"{key}: {value[:50]}... ({len(value)} chars total)")
+                else:
+                    formatted_msg.append(f"{key}: {value}")
             
             full_msg = "\n".join(formatted_msg)
             print(f"[RECEIVED] Full message:\n{full_msg}")
@@ -82,19 +88,55 @@ class Node:
             self._log_verbose_message(pm)
         
         if t == "PROFILE":
-            self.state.update_peer(kv["USER_ID"], kv.get("DISPLAY_NAME", kv["USER_ID"]), kv.get("STATUS", ""))
-            # Only show PROFILE messages in verbose mode
-            self._log_verbose(f"[PROFILE] {kv.get('DISPLAY_NAME', kv['USER_ID'])}: {kv.get('STATUS','')}")
+            # Extract avatar fields if present
+            avatar_type = kv.get("AVATAR_TYPE")
+            avatar_encoding = kv.get("AVATAR_ENCODING")
+            avatar_data = kv.get("AVATAR_DATA")
+            
+            self.state.update_peer(
+                kv["USER_ID"], 
+                kv.get("DISPLAY_NAME", kv["USER_ID"]), 
+                kv.get("STATUS", ""),
+                avatar_type=avatar_type,
+                avatar_encoding=avatar_encoding,
+                avatar_data=avatar_data
+            )
+            
+            # Create display message for PROFILE - ALWAYS show this with PFP indicator
+            display_name = kv.get("DISPLAY_NAME", kv["USER_ID"])
+            status = kv.get("STATUS", "")
+            
+            # Add [PFP] indicator if user has avatar
+            pfp_indicator = ""
+            if avatar_type and avatar_data:
+                pfp_indicator = " [PFP]"
+            
+            # Always show PROFILE messages (not just in verbose mode) with PFP indicator
+            self._log(f"[PROFILE] {display_name}: {status}{pfp_indicator}")
+            
+            # In verbose mode, also show detailed avatar info
+            if self.verbose and avatar_type and avatar_data:
+                avatar_size_kb = len(avatar_data) * 3 // 4 // 1024  # rough base64 to bytes conversion
+                self._log_verbose(f"          Avatar details: {avatar_type}, ~{avatar_size_kb}KB")
+            
         elif t == "POST":
             self.state.add_post(kv["USER_ID"], kv.get("CONTENT", ""), kv.get("MESSAGE_ID", ""))
-            name = self.state.peers.get(kv["USER_ID"], store.Peer(kv["USER_ID"], kv["USER_ID"]))
-            # Always show POST messages
-            self._log(f"[POST] {name.display_name}: {kv.get('CONTENT','')}")
+            peer = self.state.peers.get(kv["USER_ID"])
+            if peer:
+                name_with_pfp = peer.display_name + (" [PFP]" if peer.has_avatar else "")
+            else:
+                name_with_pfp = kv["USER_ID"]
+            # Always show POST messages with PFP indicator
+            self._log(f"[POST] {name_with_pfp}: {kv.get('CONTENT','')}")
         elif t == "DM":
             self.state.add_dm(kv["FROM"], kv.get("CONTENT", ""), kv.get("MESSAGE_ID", ""))
-            name = self.state.peers.get(kv["FROM"], store.Peer(kv["FROM"], kv["FROM"]))
-            # Always show DM messages
-            self._log(f"[DM] {name.display_name}: {kv.get('CONTENT','')}")
+            peer = self.state.peers.get(kv["FROM"])
+            if peer:
+                name_with_pfp = peer.display_name + (" [PFP]" if peer.has_avatar else "")
+            else:
+                name_with_pfp = kv["FROM"]
+            # Always show DM messages with PFP indicator
+            self._log(f"[DM] {name_with_pfp}: {kv.get('CONTENT','')}")
         elif t == "PING":
             # Only show in verbose mode; reply with PROFILE to the sender host (unicast)
             self._log_verbose(f"[PING] from {kv.get('USER_ID', 'unknown')}")
@@ -240,13 +282,17 @@ class Node:
         invitee_symbol = "O" if symbol == "X" else "X"
         game = self.tictactoe.create_game(game_id, from_user, self.user_id, symbol)
         
-        from_name = self.state.peers.get(from_user, store.Peer(from_user, from_user)).display_name
-        self._log(f"{from_name} is inviting you to play tic-tac-toe.")
+        peer = self.state.peers.get(from_user)
+        if peer:
+            from_name_with_pfp = peer.display_name + (" [PFP]" if peer.has_avatar else "")
+        else:
+            from_name_with_pfp = from_user
+        
+        self._log(f"{from_name_with_pfp} is inviting you to play tic-tac-toe.")
         
         if self.verbose:
-            self._log_verbose(f"Game ID: {game_id}, You are: {invitee_symbol}, {from_name} is: {symbol}")
+            self._log_verbose(f"Game ID: {game_id}, You are: {invitee_symbol}, {from_name_with_pfp} is: {symbol}")
             self._log_verbose("Use 'tictactoe move <game_id> <position>' to play (positions 0-8)")
-
 
     def _handle_tictactoe_result(self, kv: dict):
         """Handle game result message"""
@@ -293,6 +339,13 @@ class Node:
             "DISPLAY_NAME": self.display_name,
             "STATUS": self.status,
         }
+        
+        # Add avatar fields if we have avatar data
+        if self.avatar_data:
+            kv["AVATAR_TYPE"] = self.avatar_data.get("type", "")
+            kv["AVATAR_ENCODING"] = self.avatar_data.get("encoding", "")
+            kv["AVATAR_DATA"] = self.avatar_data.get("data", "")
+        
         data = messages.format_message(kv).encode(config.ENCODING)
         self.udp.send_broadcast(data)
 
@@ -303,6 +356,13 @@ class Node:
             "DISPLAY_NAME": self.display_name,
             "STATUS": self.status,
         }
+        
+        # Add avatar fields if we have avatar data
+        if self.avatar_data:
+            kv["AVATAR_TYPE"] = self.avatar_data.get("type", "")
+            kv["AVATAR_ENCODING"] = self.avatar_data.get("encoding", "")
+            kv["AVATAR_DATA"] = self.avatar_data.get("data", "")
+        
         data = messages.format_message(kv).encode(config.ENCODING)
         self.udp.send_unicast(data, host=host)
 

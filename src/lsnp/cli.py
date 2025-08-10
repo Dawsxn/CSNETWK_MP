@@ -4,6 +4,8 @@ import socket
 import sys
 import time
 import random
+import base64
+import os
 
 from .node import Node
 from . import config
@@ -27,11 +29,44 @@ def get_local_ip():
     return ip
 
 
+def load_avatar(avatar_path: str) -> tuple[str, str, str]:
+    """Load avatar from file and return (mime_type, encoding, base64_data)"""
+    if not os.path.exists(avatar_path):
+        raise FileNotFoundError(f"Avatar file not found: {avatar_path}")
+    
+    # Get file size and check limit (~20KB)
+    file_size = os.path.getsize(avatar_path)
+    if file_size > 20 * 1024:
+        raise ValueError(f"Avatar file too large: {file_size} bytes (max ~20KB)")
+    
+    # Determine MIME type from file extension
+    ext = os.path.splitext(avatar_path)[1].lower()
+    mime_types = {
+        '.png': 'image/png',
+        '.jpg': 'image/jpeg',
+        '.jpeg': 'image/jpeg',
+        '.gif': 'image/gif',
+        '.bmp': 'image/bmp',
+        '.webp': 'image/webp'
+    }
+    
+    mime_type = mime_types.get(ext, 'application/octet-stream')
+    
+    # Read and encode file
+    with open(avatar_path, 'rb') as f:
+        image_data = f.read()
+    
+    base64_data = base64.b64encode(image_data).decode('ascii')
+    
+    return mime_type, 'base64', base64_data
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="lsnp", description="LSNP CLI")
     parser.add_argument("--user", required=False, help="USER_ID like name@ip; defaults to hostname@localip")
     parser.add_argument("--name", required=False, help="Display name", default=None)
     parser.add_argument("--status", required=False, help="Status text", default="Exploring LSNP!")
+    parser.add_argument("--avatar", required=False, help="Path to avatar image file (PNG, JPG, etc., max ~20KB)")
     parser.add_argument("--quiet", action="store_true", help="Non-verbose printing")
 
     sub = parser.add_subparsers(dest="cmd")
@@ -70,7 +105,23 @@ def main(argv=None):
     user_id = args.user or default_user_id()
     display_name = args.name or user_id.split("@")[0]
 
-    node = Node(user_id=user_id, display_name=display_name, status=args.status, verbose=not args.quiet)
+    # Load avatar if provided
+    avatar_data = None
+    if args.avatar:
+        try:
+            avatar_type, avatar_encoding, avatar_b64 = load_avatar(args.avatar)
+            avatar_data = {
+                'type': avatar_type,
+                'encoding': avatar_encoding,
+                'data': avatar_b64
+            }
+            print(f"Avatar loaded: {avatar_type}, {len(avatar_b64)} characters")
+        except Exception as e:
+            print(f"Error loading avatar: {e}")
+            return 1
+
+    node = Node(user_id=user_id, display_name=display_name, status=args.status, 
+                avatar_data=avatar_data, verbose=not args.quiet)
 
     # Handle tic-tac-toe commands
     if args.cmd == "tictactoe":
@@ -247,19 +298,42 @@ def main(argv=None):
 
         if args.what == "peers":
             peers = node.state.list_peers()
-            for p in peers:
-                print(f"- {p.display_name} ({p.user_id}) — {p.status}")
+            if peers:
+                for p in peers:
+                    pfp_indicator = " [PFP]" if p.has_avatar else ""
+                    print(f"- {p.display_name} ({p.user_id}) — {p.status}{pfp_indicator}")
+            else:
+                print("No peers found.")
         elif args.what == "posts":
-            for m in node.state.list_posts():
-                print(f"- {m.user_id}: {m.content} [{m.message_id}]")
+            posts = node.state.list_posts()
+            if posts:
+                for m in posts:
+                    peer = node.state.peers.get(m.user_id)
+                    if peer:
+                        name_with_pfp = peer.display_name + (" [PFP]" if peer.has_avatar else "")
+                    else:
+                        name_with_pfp = m.user_id
+                    print(f"- {name_with_pfp}: {m.content} [{m.message_id}]")
+            else:
+                print("No posts found.")
         else:  # dms
-            for m in node.state.list_dms():
-                print(f"- {m.user_id}: {m.content} [{m.message_id}]")
+            dms = node.state.list_dms()
+            if dms:
+                for m in dms:
+                    peer = node.state.peers.get(m.user_id)
+                    if peer:
+                        name_with_pfp = peer.display_name + (" [PFP]" if peer.has_avatar else "")
+                    else:
+                        name_with_pfp = m.user_id
+                    print(f"- {name_with_pfp}: {m.content} [{m.message_id}]")
+            else:
+                print("No DMs found.")
         return 0
 
     # default: run (if args.cmd == "run" or no subcommand supplied)
     node.start()
-    print("LSNP node running. Press Ctrl+C to stop.")
+    avatar_status = " (with avatar)" if avatar_data else ""
+    print(f"LSNP node running{avatar_status}. Press Ctrl+C to stop.")
     try:
         while True:
             time.sleep(1)
