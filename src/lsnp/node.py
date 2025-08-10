@@ -5,6 +5,7 @@ import time
 from typing import Tuple
 
 from . import config, messages, transport, state as store
+from .tictactoe import TicTacToeManager
 
 
 class Node:
@@ -14,6 +15,7 @@ class Node:
         self.status = status
         self.verbose = verbose
         self.state = store.LSNPState()
+        self.tictactoe = TicTacToeManager()
         self.udp = transport.UDPTransport()
         self.udp.on_message = self._on_udp
         self._lock = threading.Lock()
@@ -65,7 +67,7 @@ class Node:
             parsed = messages.parse_message(text)
             parsed.addr = addr
         except Exception as e:
-            self._log(f"[parse-error] from {addr}: {e}")
+            self._log_verbose(f"[parse-error] from {addr}: {e}")
             return
 
         with self._lock:
@@ -109,8 +111,179 @@ class Node:
             verb = "followed" if t == "FOLLOW" else "unfollowed"
             # Always show FOLLOW/UNFOLLOW messages
             self._log(f"[INFO] User {actor} has {verb} you")
+        elif t == "TICTACTOE_INVITE":
+            self._handle_tictactoe_invite(kv)
+        elif t == "TICTACTOE_MOVE":
+            self._handle_tictactoe_move(kv)
+        elif t == "TICTACTOE_RESULT":
+            self._handle_tictactoe_result(kv)
+        elif t == "TICTACTOE_MOVE_RESPONSE":
+            self._handle_tictactoe_move_response(kv)
         else:
             self._log_verbose(f"[UNKNOWN] {t}")
+
+    def _handle_tictactoe_move(self, kv: dict):
+        """Handle incoming tic-tac-toe move"""
+        from_user = kv.get("FROM", "")
+        game_id = kv.get("GAMEID", "")
+        position = int(kv.get("POSITION", "0"))
+        symbol = kv.get("SYMBOL", "")
+        turn_str = kv.get("TURN", "1")
+        
+        # Handle AUTO symbol and turn
+        game = self.tictactoe.get_game(game_id)
+        
+        if symbol == "AUTO" or turn_str == "AUTO":
+            if not game:
+                self._log_verbose(f"[TICTACTOE] Cannot auto-determine symbol/turn for unknown game {game_id}")
+                return
+            
+            # Auto-determine symbol and turn
+            if from_user == game.player1:
+                symbol = game.player1_symbol
+            elif from_user == game.player2:
+                symbol = game.player2_symbol
+            else:
+                self._log_verbose(f"[TICTACTOE] Player {from_user} not in game {game_id}")
+                return
+            
+            turn = game.current_turn
+        else:
+            turn = int(turn_str)
+        
+        if not game:
+            # Try to recreate the game - this could be the invitee's first move
+            # If we sent an invitation, we should be able to recreate it
+            # The from_user is making a move, so they're the invitee
+            our_symbol = "O" if symbol == "X" else "X"
+            
+            # Create game with us as inviter (player1) and them as invitee (player2)
+            game = self.tictactoe.create_game(game_id, self.user_id, from_user, our_symbol)
+            self._log(f"Game {game_id} recreated! You are {our_symbol}, opponent is {symbol}")
+        
+        success, message = self.tictactoe.make_move(game_id, from_user, position, symbol, turn)
+        
+        if success:
+            # Display the board
+            board_display = self.tictactoe.format_board(game_id)
+            self._log(board_display)
+            
+            # Send a response back to the move sender so they can see the board too
+            # (This helps when they're using CLI from a different terminal)
+            if from_user != self.user_id:  # Don't send to ourselves
+                self.send_tictactoe_move_response(
+                    to_user=from_user,
+                    game_id=game_id,
+                    board_state=game.board,
+                    current_turn=game.current_turn,
+                    whose_turn=game.whose_turn,
+                    finished=game.finished,
+                    winner=game.winner
+                )
+            
+            # Check if game is finished
+            game = self.tictactoe.get_game(game_id)
+            if game and game.finished:
+                # Send result message
+                self.send_tictactoe_result(
+                    game_id=game_id,
+                    to_user=from_user,
+                    result="WIN" if game.winner == self.user_id else "LOSS" if game.winner == from_user else "DRAW",
+                    symbol=game.player1_symbol if self.user_id == game.player1 else game.player2_symbol,
+                    winning_line=game.winning_line
+                )
+        else:
+            self._log_verbose(f"[TICTACTOE] Invalid move: {message}")
+            # Debug information
+            if game:
+                self._log_verbose(f"[TICTACTOE] Game state - Player1: {game.player1} ({game.player1_symbol}), Player2: {game.player2} ({game.player2_symbol})")
+                self._log_verbose(f"[TICTACTOE] Current turn: {game.current_turn}, Whose turn: {game.whose_turn}")
+                self._log_verbose(f"[TICTACTOE] Move attempt - From: {from_user}, Symbol: {symbol}, Turn: {turn}")
+
+    def _handle_tictactoe_move_response(self, kv: dict):
+        """Handle move response to recreate/update local game state"""
+        from_user = kv.get("FROM", "")
+        game_id = kv.get("GAMEID", "")
+        board_str = kv.get("BOARD", "")
+        current_turn = int(kv.get("CURRENT_TURN", "1"))
+        whose_turn = kv.get("WHOSE_TURN", "")
+        finished = kv.get("FINISHED", "false").lower() == "true"
+        winner = kv.get("WINNER", "")
+        
+        # Get or create the game
+        game = self.tictactoe.get_game(game_id)
+        if not game:
+            # Create a minimal game state just for display
+            # We'll assume we're the other player
+            our_symbol = "X"  # This will be corrected based on whose_turn
+            game = self.tictactoe.create_game(game_id, self.user_id, from_user, our_symbol)
+        
+        # Update the game state
+        game.board = board_str.split(",")
+        game.current_turn = current_turn
+        game.whose_turn = whose_turn
+        game.finished = finished
+        if winner:
+            game.winner = winner
+        
+        # Display the board
+        board_display = self.tictactoe.format_board(game_id)
+        self._log(board_display)
+
+    def _handle_tictactoe_invite(self, kv: dict):
+        """Handle incoming tic-tac-toe game invitation"""
+        from_user = kv.get("FROM", "")
+        game_id = kv.get("GAMEID", "")
+        symbol = kv.get("SYMBOL", "")  # This is the inviter's symbol
+        
+        # Create the game with the inviter as player1 and us as player2
+        invitee_symbol = "O" if symbol == "X" else "X"
+        game = self.tictactoe.create_game(game_id, from_user, self.user_id, symbol)
+        
+        from_name = self.state.peers.get(from_user, store.Peer(from_user, from_user)).display_name
+        self._log(f"{from_name} is inviting you to play tic-tac-toe.")
+        
+        if self.verbose:
+            self._log_verbose(f"Game ID: {game_id}, You are: {invitee_symbol}, {from_name} is: {symbol}")
+            self._log_verbose("Use 'tictactoe move <game_id> <position>' to play (positions 0-8)")
+
+
+    def _handle_tictactoe_result(self, kv: dict):
+        """Handle game result message"""
+        from_user = kv.get("FROM", "")
+        game_id = kv.get("GAMEID", "")
+        result = kv.get("RESULT", "")
+        
+        game = self.tictactoe.get_game(game_id)
+        if game:
+            board_display = self.tictactoe.format_board(game_id)
+            self._log(board_display)
+            
+            # Clean up finished game
+            self.tictactoe.remove_game(game_id)
+
+    def send_tictactoe_move_response(self, to_user: str, game_id: str, board_state: list, current_turn: int, whose_turn: str, finished: bool, winner: str = None):
+        """Send a move response so the sender can see the updated board"""
+        kv = {
+            "TYPE": "TICTACTOE_MOVE_RESPONSE",
+            "FROM": self.user_id,
+            "TO": to_user,
+            "GAMEID": game_id,
+            "MESSAGE_ID": hex(int(time.time()*1000))[2:],
+            "BOARD": ",".join(board_state),
+            "CURRENT_TURN": str(current_turn),
+            "WHOSE_TURN": whose_turn,
+            "FINISHED": str(finished).lower(),
+            "TIMESTAMP": str(int(time.time())),
+        }
+        
+        if winner:
+            kv["WINNER"] = winner
+        
+        host = to_user.split("@")[-1] if "@" in to_user else to_user
+        from . import messages
+        data = messages.format_message(kv).encode(config.ENCODING)
+        self.udp.send_unicast(data, host=host)
 
     # --- sending helpers ---
     def broadcast_profile(self):
@@ -183,6 +356,56 @@ class Node:
             "TOKEN": token,
         }
         host = to_user_host.split("@")[-1] if "@" in to_user_host else to_user_host
+        self.udp.send_unicast(messages.format_message(kv).encode(config.ENCODING), host=host)
+
+    def send_tictactoe_invite(self, to_user_host: str, game_id: str, symbol: str, message_id: str, token: str):
+        """Send tic-tac-toe game invitation"""
+        kv = {
+            "TYPE": "TICTACTOE_INVITE",
+            "FROM": self.user_id,
+            "TO": to_user_host,
+            "GAMEID": game_id,
+            "MESSAGE_ID": message_id,
+            "SYMBOL": symbol,
+            "TIMESTAMP": str(int(time.time())),
+            "TOKEN": token,
+        }
+        host = to_user_host.split("@")[-1] if "@" in to_user_host else to_user_host
+        self.udp.send_unicast(messages.format_message(kv).encode(config.ENCODING), host=host)
+
+    def send_tictactoe_move(self, to_user_host: str, game_id: str, position: int, symbol: str, turn: int, message_id: str, token: str):
+        """Send tic-tac-toe move"""
+        kv = {
+            "TYPE": "TICTACTOE_MOVE",
+            "FROM": self.user_id,
+            "TO": to_user_host,
+            "GAMEID": game_id,
+            "MESSAGE_ID": message_id,
+            "POSITION": str(position),
+            "SYMBOL": symbol,
+            "TURN": str(turn),
+            "TOKEN": token,
+        }
+        host = to_user_host.split("@")[-1] if "@" in to_user_host else to_user_host
+        self.udp.send_unicast(messages.format_message(kv).encode(config.ENCODING), host=host)
+
+    def send_tictactoe_result(self, game_id: str, to_user: str, result: str, symbol: str, winning_line: list = None):
+        """Send tic-tac-toe game result"""
+        kv = {
+            "TYPE": "TICTACTOE_RESULT",
+            "FROM": self.user_id,
+            "TO": to_user,
+            "GAMEID": game_id,
+            "MESSAGE_ID": hex(int(time.time()*1000))[2:],
+            "RESULT": result,
+            "SYMBOL": symbol,
+            "TIMESTAMP": str(int(time.time())),
+        }
+        
+        if winning_line:
+            kv["WINNING_LINE"] = ",".join(map(str, winning_line))
+        
+        host = to_user.split("@")[-1] if "@" in to_user else to_user
         self.udp.send_unicast(messages.format_message(kv).encode(config.ENCODING), host=host)
 
     # background presence loop (RFC: every 300s)

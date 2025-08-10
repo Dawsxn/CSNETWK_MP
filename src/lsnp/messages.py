@@ -13,10 +13,16 @@ REQUIRED_FIELDS = {
     "ACK": ["TYPE", "MESSAGE_ID", "STATUS"],
     "FOLLOW": ["TYPE", "FROM", "TO", "TIMESTAMP", "MESSAGE_ID", "TOKEN"],
     "UNFOLLOW": ["TYPE", "FROM", "TO", "TIMESTAMP", "MESSAGE_ID", "TOKEN"],
+    "TICTACTOE_INVITE": ["TYPE", "FROM", "TO", "GAMEID", "MESSAGE_ID", "SYMBOL", "TIMESTAMP", "TOKEN"],
+    "TICTACTOE_MOVE": ["TYPE", "FROM", "TO", "GAMEID", "MESSAGE_ID", "POSITION", "SYMBOL", "TURN", "TOKEN"],
+    "TICTACTOE_RESULT": ["TYPE", "FROM", "TO", "GAMEID", "MESSAGE_ID", "RESULT", "SYMBOL", "TIMESTAMP"],
+    "TICTACTOE_MOVE_RESPONSE": ["TYPE", "FROM", "TO", "GAMEID", "MESSAGE_ID", "BOARD", "CURRENT_TURN", "WHOSE_TURN", "FINISHED", "TIMESTAMP"],
 }
 
 OPTIONAL_FIELDS = {
     "PROFILE": ["AVATAR_TYPE", "AVATAR_ENCODING", "AVATAR_DATA"],
+    "TICTACTOE_RESULT": ["WINNING_LINE"],
+    "TICTACTOE_MOVE_RESPONSE": ["WINNER"],
 }
 
 
@@ -64,6 +70,8 @@ def parse_message(raw: str) -> ParsedMessage:
     if msg_type == "POST" and "TTL" not in kv:
         kv["TTL"] = str(config.DEFAULT_TTL)
     if msg_type == "DM" and "TIMESTAMP" not in kv:
+        kv["TIMESTAMP"] = str(int(time.time()))
+    if msg_type in ("TICTACTOE_INVITE", "TICTACTOE_RESULT") and "TIMESTAMP" not in kv:
         kv["TIMESTAMP"] = str(int(time.time()))
 
     return ParsedMessage(type=msg_type, kv=kv, raw=raw)

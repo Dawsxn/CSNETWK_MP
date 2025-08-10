@@ -3,9 +3,28 @@ import argparse
 import socket
 import sys
 import time
+import random
 
 from .node import Node
 from . import config
+
+
+def default_user_id():
+    host = socket.gethostname()
+    ip = get_local_ip()
+    return f"{host}@{ip}"
+
+
+def get_local_ip():
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+    except Exception:
+        ip = "127.0.0.1"
+    finally:
+        s.close()
+    return ip
 
 
 def main(argv=None):
@@ -34,12 +53,143 @@ def main(argv=None):
     p_show_cmd = sub.add_parser("show", help="Show peers/posts/dms once and exit")
     p_show_cmd.add_argument("what", choices=["peers", "posts", "dms"], help="What to show")
 
+    # Tic-tac-toe commands
+    p_tictactoe = sub.add_parser("tictactoe", help="Tic-tac-toe game commands")
+    ttt_sub = p_tictactoe.add_subparsers(dest="ttt_cmd")
+    
+    p_invite = ttt_sub.add_parser("invite", help="Invite someone to play tic-tac-toe")
+    p_invite.add_argument("to", help="Destination user_id or host/ip")
+    p_invite.add_argument("--symbol", choices=["X", "O"], default="X", help="Your symbol (X or O)")
+    
+    p_move = ttt_sub.add_parser("move", help="Make a move in tic-tac-toe")
+    p_move.add_argument("game_id", help="Game ID (e.g., g123)")
+    p_move.add_argument("position", type=int, help="Position (0-8)")
+
     args = parser.parse_args(argv)
 
     user_id = args.user or default_user_id()
     display_name = args.name or user_id.split("@")[0]
 
     node = Node(user_id=user_id, display_name=display_name, status=args.status, verbose=not args.quiet)
+
+    # Handle tic-tac-toe commands
+    if args.cmd == "tictactoe":
+        if args.ttt_cmd == "invite":
+            game_id = f"g{random.randint(0, 255)}"
+            expiry = int(time.time()) + config.DEFAULT_TTL
+            token = f"{user_id}|{expiry}|game"
+            message_id = hex(int(time.time()*1000))[2:]
+            
+            node.start()
+            node.send_tictactoe_invite(
+                to_user_host=args.to,
+                game_id=game_id,
+                symbol=args.symbol,
+                message_id=message_id,
+                token=token
+            )
+            print(f"Tic-tac-toe invitation sent to {args.to} (Game ID: {game_id})")
+            try:
+                time.sleep(2)
+            finally:
+                node.stop()
+            return 0
+            
+        elif args.ttt_cmd == "move":
+            expiry = int(time.time()) + config.DEFAULT_TTL
+            token = f"{user_id}|{expiry}|game"
+            message_id = hex(int(time.time()*1000))[2:]
+            
+            node.start()
+            
+            # Brief pause to receive any pending messages (like invitations)
+            time.sleep(0.5)
+            
+            # Get the game to determine opponent and our symbol
+            game = node.tictactoe.get_game(args.game_id)
+            if not game:
+                # Game not found locally - send move anyway and let the network handle it
+                print(f"Game {args.game_id} not found locally. Sending move...")
+                
+                # Send the move via broadcast - the opponent's node will handle it
+                from . import messages
+                kv = {
+                    "TYPE": "TICTACTOE_MOVE",
+                    "FROM": user_id,
+                    "TO": "broadcast",
+                    "GAMEID": args.game_id,
+                    "MESSAGE_ID": message_id,
+                    "POSITION": str(args.position),
+                    "SYMBOL": "AUTO",  # Let the receiving end determine our symbol
+                    "TURN": "AUTO",    # Let the receiving end determine the turn
+                    "TOKEN": token,
+                }
+                data = messages.format_message(kv).encode(config.ENCODING)
+                node.udp.send_broadcast(data)
+                
+                print(f"Move sent for position {args.position}")
+                
+                # Wait a bit longer to receive the response and see if game gets created
+                time.sleep(2)
+                
+                # Check if we now have the game (from the response)
+                game = node.tictactoe.get_game(args.game_id)
+                if game:
+                    board_display = node.tictactoe.format_board(args.game_id)
+                    print(board_display)
+                
+                try:
+                    time.sleep(1)
+                finally:
+                    node.stop()
+                return 0
+            
+            # If we have the game locally, proceed normally
+            our_symbol = game.player1_symbol if user_id == game.player1 else game.player2_symbol
+            opponent = game.player2 if user_id == game.player1 else game.player1
+            
+            # Make the move locally first to validate
+            success, message = node.tictactoe.make_move(args.game_id, user_id, args.position, our_symbol, game.current_turn)
+            if not success:
+                print(f"Invalid move: {message}")
+                node.stop()
+                return 1
+            
+            # Show the board immediately after our move
+            board_display = node.tictactoe.format_board(args.game_id)
+            print(board_display)
+            
+            # Send the move to opponent
+            node.send_tictactoe_move(
+                to_user_host=opponent,
+                game_id=args.game_id,
+                position=args.position,
+                symbol=our_symbol,
+                turn=game.current_turn - 1,  # current_turn was incremented
+                message_id=message_id,
+                token=token
+            )
+            
+            # Check if game finished
+            if game.finished:
+                # Send result to opponent
+                result = "WIN" if game.winner == user_id else "LOSS" if game.winner else "DRAW"
+                node.send_tictactoe_result(
+                    game_id=args.game_id,
+                    to_user=opponent,
+                    result="LOSS" if result == "WIN" else "WIN" if result == "LOSS" else "DRAW",
+                    symbol=game.player1_symbol if opponent == game.player1 else game.player2_symbol,
+                    winning_line=game.winning_line
+                )
+            
+            try:
+                time.sleep(2)
+            finally:
+                node.stop()
+            return 0
+        else:
+            print("Use 'tictactoe invite <user>' or 'tictactoe move <game_id> <position>'")
+            return 1
 
     if args.cmd == "post":
         ttl = int(args.ttl) if getattr(args, "ttl", None) else config.DEFAULT_TTL
@@ -118,24 +268,6 @@ def main(argv=None):
     finally:
         node.stop()
     return 0
-
-
-def default_user_id():
-    host = socket.gethostname()
-    ip = get_local_ip()
-    return f"{host}@{ip}"
-
-
-def get_local_ip():
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
-    except Exception:
-        ip = "127.0.0.1"
-    finally:
-        s.close()
-    return ip
 
 
 if __name__ == "__main__":
