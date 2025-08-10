@@ -17,13 +17,25 @@ class Node:
         self.udp = transport.UDPTransport()
         self.udp.on_message = self._on_udp
         self._lock = threading.Lock()
+        # presence scheduler fields
+        self._presence_thread = None
+        self._presence_stop = threading.Event()
+        self._last_profile_sent = 0.0
 
     def start(self):
         self.udp.start()
         # announce profile on start
         self.broadcast_profile()
+        self._last_profile_sent = time.time()
+        # presence scheduler thread
+        self._presence_stop.clear()
+        self._presence_thread = threading.Thread(target=self._presence_loop, daemon=True)
+        self._presence_thread.start()
 
     def stop(self):
+        self._presence_stop.set()
+        if self._presence_thread:
+            self._presence_thread.join(timeout=1)
         self.udp.stop()
 
     def _log(self, msg: str):
@@ -57,8 +69,13 @@ class Node:
             name = self.state.peers.get(kv["FROM"], store.Peer(kv["FROM"], kv["FROM"]))
             self._log(f"[DM] {name.display_name}: {kv.get('CONTENT','')}")
         elif t == "PING":
-            # do not print
-            pass
+            # do not print; reply with PROFILE to the sender host (unicast)
+            try:
+                host = pm.addr[0] if pm.addr else None
+                if host:
+                    self._send_profile_unicast(host)
+            except Exception:
+                pass
         elif t == "ACK":
             pass
         elif t in ("FOLLOW", "UNFOLLOW"):
@@ -78,6 +95,16 @@ class Node:
         }
         data = messages.format_message(kv).encode(config.ENCODING)
         self.udp.send_broadcast(data)
+
+    def _send_profile_unicast(self, host: str):
+        kv = {
+            "TYPE": "PROFILE",
+            "USER_ID": self.user_id,
+            "DISPLAY_NAME": self.display_name,
+            "STATUS": self.status,
+        }
+        data = messages.format_message(kv).encode(config.ENCODING)
+        self.udp.send_unicast(data, host=host)
 
     def send_post(self, content: str, message_id: str, token: str, ttl: int | None = None):
         kv = {
@@ -106,3 +133,42 @@ class Node:
     def send_ping(self):
         kv = {"TYPE": "PING", "USER_ID": self.user_id}
         self.udp.send_broadcast(messages.format_message(kv).encode(config.ENCODING))
+
+    def send_follow(self, to_user_host: str, message_id: str, token: str):
+        kv = {
+            "TYPE": "FOLLOW",
+            "MESSAGE_ID": message_id,
+            "FROM": self.user_id,
+            "TO": to_user_host,
+            "TIMESTAMP": str(int(time.time())),
+            "TOKEN": token,
+        }
+        host = to_user_host.split("@")[-1] if "@" in to_user_host else to_user_host
+        self.udp.send_unicast(messages.format_message(kv).encode(config.ENCODING), host=host)
+
+    def send_unfollow(self, to_user_host: str, message_id: str, token: str):
+        kv = {
+            "TYPE": "UNFOLLOW",
+            "MESSAGE_ID": message_id,
+            "FROM": self.user_id,
+            "TO": to_user_host,
+            "TIMESTAMP": str(int(time.time())),
+            "TOKEN": token,
+        }
+        host = to_user_host.split("@")[-1] if "@" in to_user_host else to_user_host
+        self.udp.send_unicast(messages.format_message(kv).encode(config.ENCODING), host=host)
+
+    # background presence loop (RFC: every 300s)
+    def _presence_loop(self):
+        last_tick = time.time()
+        while not self._presence_stop.is_set():
+            self._presence_stop.wait(timeout=1.0)
+            now = time.time()
+            if now - last_tick >= config.PRESENCE_INTERVAL:
+                # Default to PING unless a PROFILE is needed in this interval
+                if now - self._last_profile_sent >= config.PRESENCE_INTERVAL:
+                    self.broadcast_profile()
+                    self._last_profile_sent = now
+                else:
+                    self.send_ping()
+                last_tick = now

@@ -9,17 +9,27 @@ from . import config
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(prog="lsnp", description="LSNP Milestone 1 CLI")
+    parser = argparse.ArgumentParser(prog="lsnp", description="LSNP CLI")
     parser.add_argument("--user", required=False, help="USER_ID like name@ip; defaults to hostname@localip")
     parser.add_argument("--name", required=False, help="Display name", default=None)
     parser.add_argument("--status", required=False, help="Status text", default="Exploring LSNP!")
     parser.add_argument("--quiet", action="store_true", help="Non-verbose printing")
 
     sub = parser.add_subparsers(dest="cmd")
-    sub.add_parser("run", help="Run node (broadcast profile, receive, print events)")
+    sub.add_parser("run", help="Run node (broadcast profile, periodic presence, receive, print events)")
     p_post = sub.add_parser("post", help="Broadcast a post")
     p_post.add_argument("content")
     p_post.add_argument("--ttl", type=int, help="Override TTL for POST (seconds)")
+
+    p_dm = sub.add_parser("dm", help="Send a direct message to a host/user")
+    p_dm.add_argument("to", help="Destination user_id or host/ip")
+    p_dm.add_argument("content")
+
+    p_follow = sub.add_parser("follow", help="Follow a user")
+    p_follow.add_argument("to", help="Destination user_id or host/ip")
+
+    p_unfollow = sub.add_parser("unfollow", help="Unfollow a user")
+    p_unfollow.add_argument("to", help="Destination user_id or host/ip")
 
     p_show_cmd = sub.add_parser("show", help="Show peers/posts/dms once and exit")
     p_show_cmd.add_argument("what", choices=["peers", "posts", "dms"], help="What to show")
@@ -43,6 +53,38 @@ def main(argv=None):
             time.sleep(2)
         finally:
             node.stop()
+        return 0
+
+    if args.cmd == "dm":
+        expiry = int(time.time()) + config.DEFAULT_TTL
+        token = f"{user_id}|{expiry}|chat"
+        node.start()
+        node.send_dm(to_user_host=args.to, content=args.content, message_id=hex(int(time.time()*1000))[2:], token=token)
+        print("DM sent. Listening briefly for replies...")
+        try:
+            time.sleep(2)
+        finally:
+            node.stop()
+        return 0
+
+    if args.cmd == "follow":
+        expiry = int(time.time()) + config.DEFAULT_TTL
+        token = f"{user_id}|{expiry}|follow"
+        node.start()
+        node.send_follow(to_user_host=args.to, message_id=hex(int(time.time()*1000))[2:], token=token)
+        print("FOLLOW sent.")
+        time.sleep(1)
+        node.stop()
+        return 0
+
+    if args.cmd == "unfollow":
+        expiry = int(time.time()) + config.DEFAULT_TTL
+        token = f"{user_id}|{expiry}|follow"
+        node.start()
+        node.send_unfollow(to_user_host=args.to, message_id=hex(int(time.time()*1000))[2:], token=token)
+        print("UNFOLLOW sent.")
+        time.sleep(1)
+        node.stop()
         return 0
 
     if args.cmd == "show":
@@ -70,8 +112,7 @@ def main(argv=None):
     print("LSNP node running. Press Ctrl+C to stop.")
     try:
         while True:
-            time.sleep(2)
-            node.send_ping()
+            time.sleep(1)
     except KeyboardInterrupt:
         pass
     finally:

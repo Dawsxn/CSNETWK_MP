@@ -7,3 +7,6 @@ RECV_BUFSIZE = 65535
 
 # Toggle verbose logging from CLI
 VERBOSE = True
+
+# Presence interval (seconds) for periodic PING/PROFILE per RFC
+PRESENCE_INTERVAL = 300
