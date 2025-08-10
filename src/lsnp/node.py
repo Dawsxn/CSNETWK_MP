@@ -26,11 +26,16 @@ class Node:
         self._presence_thread = None
         self._presence_stop = threading.Event()
         self._last_profile_sent = 0.0
-    # file transfer buffers: file_id -> {
-    #   'from': uid, 'to': uid, 'filename': str, 'filesize': int,
-    #   'filetype': str, 'total_chunks': int|None, 'chunks': dict[int, bytes],
-    #   'received_count': int, 'save_path': Optional[str]
-    # }
+        # file transfer runtime attributes
+        self._file_buffers = {}
+        env_val = os.environ.get("LSNP_AUTO_ACCEPT_FILES", "1").lower()
+        self.file_auto_accept = env_val not in ("0", "false", "no")
+        self._declined_files = set()
+        # file transfer buffers: file_id -> {
+        #   'from': uid, 'to': uid, 'filename': str, 'filesize': int,
+        #   'filetype': str, 'total_chunks': int|None, 'chunks': dict[int, bytes],
+        #   'received_count': int, 'save_path': Optional[str]
+        # }
         
 
     def start(self):
@@ -311,6 +316,8 @@ class Node:
             if to_field and to_field != self.user_id:
                 return
             # Drop if this file was declined
+            if not hasattr(self, "_declined_files"):
+                self._declined_files = set()
             if kv.get("FILEID", "") in self._declined_files:
                 return
             self._handle_file_chunk(pm)
