@@ -85,6 +85,15 @@ def main(argv=None):
     p_unfollow = sub.add_parser("unfollow", help="Unfollow a user")
     p_unfollow.add_argument("to", help="Destination user_id or host/ip")
 
+    # File transfer command
+    p_file = sub.add_parser("file", help="File transfer commands")
+    file_sub = p_file.add_subparsers(dest="file_cmd")
+    p_send = file_sub.add_parser("send", help="Send a file to a user")
+    p_send.add_argument("to", help="Destination user_id or host/ip")
+    p_send.add_argument("path", help="Path to local file")
+    p_send.add_argument("--desc", dest="desc", help="Optional description", default=None)
+    p_send.add_argument("--chunk", dest="chunk", type=int, help="Chunk size (bytes)", default=1200)
+
     p_like = sub.add_parser("like", help="Like or unlike a user's post")
     p_like.add_argument("to", help="Post author's user_id or host/ip")
     p_like.add_argument("post_timestamp", type=int, help="Post TIMESTAMP to react to")
@@ -293,6 +302,42 @@ def main(argv=None):
         time.sleep(1)
         node.stop()
         return 0
+
+    if args.cmd == "file":
+        if args.file_cmd == "send":
+            import os, base64, mimetypes
+            if not os.path.isfile(args.path):
+                print(f"File not found: {args.path}")
+                return 1
+            filesize = os.path.getsize(args.path)
+            filename = os.path.basename(args.path)
+            filetype, _ = mimetypes.guess_type(filename)
+            filetype = filetype or 'application/octet-stream'
+            expiry = int(time.time()) + config.DEFAULT_TTL
+            token = f"{user_id}|{expiry}|file"
+            file_id = hex(int(time.time()*1000))[2:]
+
+            node.start()
+            # Offer
+            node.send_file_offer(to_user=args.to, filename=filename, filesize=filesize, filetype=filetype, file_id=file_id, description=args.desc, token=token)
+            # Send chunks
+            chunk_size = max(256, int(args.chunk))
+            total_chunks = (filesize + chunk_size - 1) // chunk_size
+            with open(args.path, 'rb') as f:
+                for i in range(total_chunks):
+                    data = f.read(chunk_size)
+                    if not data:
+                        break
+                    node.send_file_chunk(to_user=args.to, file_id=file_id, chunk_index=i, total_chunks=total_chunks, chunk_bytes=data, token=token)
+                    # Optional pacing to avoid buffer overrun
+                    time.sleep(0.01)
+            print(f"File '{filename}' offered and {total_chunks} chunks sent")
+            time.sleep(1)
+            node.stop()
+            return 0
+        else:
+            print("Use: file send <to> <path> [--desc text] [--chunk N]")
+            return 1
 
     if args.cmd == "like":
         node.start()

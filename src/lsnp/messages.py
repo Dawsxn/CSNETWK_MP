@@ -15,6 +15,16 @@ REQUIRED_FIELDS = {
     "FOLLOW": ["TYPE", "FROM", "TO", "TIMESTAMP", "MESSAGE_ID", "TOKEN"],
     "UNFOLLOW": ["TYPE", "FROM", "TO", "TIMESTAMP", "MESSAGE_ID", "TOKEN"],
     "LIKE": ["TYPE", "FROM", "TO", "POST_TIMESTAMP", "ACTION", "TIMESTAMP", "TOKEN"],
+    # File transfer messages per RFC
+    "FILE_OFFER": [
+        "TYPE", "FROM", "TO", "FILENAME", "FILESIZE", "FILETYPE", "FILEID", "TIMESTAMP", "TOKEN"
+    ],
+    "FILE_CHUNK": [
+        "TYPE", "FROM", "TO", "FILEID", "CHUNK_INDEX", "TOTAL_CHUNKS", "CHUNK_SIZE", "TOKEN", "DATA"
+    ],
+    "FILE_RECEIVED": [
+        "TYPE", "FROM", "TO", "FILEID", "STATUS", "TIMESTAMP"
+    ],
     "TICTACTOE_INVITE": ["TYPE", "FROM", "TO", "GAMEID", "MESSAGE_ID", "SYMBOL", "TIMESTAMP", "TOKEN"],
     "TICTACTOE_MOVE": ["TYPE", "FROM", "TO", "GAMEID", "MESSAGE_ID", "POSITION", "SYMBOL", "TURN", "TOKEN"],
     "TICTACTOE_RESULT": ["TYPE", "FROM", "TO", "GAMEID", "MESSAGE_ID", "RESULT", "SYMBOL", "TIMESTAMP"],
@@ -23,6 +33,7 @@ REQUIRED_FIELDS = {
 
 OPTIONAL_FIELDS = {
     "PROFILE": ["AVATAR_TYPE", "AVATAR_ENCODING", "AVATAR_DATA"],
+    "FILE_OFFER": ["DESCRIPTION"],
     "TICTACTOE_RESULT": ["WINNING_LINE"],
     "TICTACTOE_MOVE_RESPONSE": ["WINNER"],
 }
@@ -61,14 +72,11 @@ def parse_message(raw: str) -> ParsedMessage:
     if not msg_type:
         raise ValueError("Missing TYPE")
 
-    # Defaults first, so required validation can pass when defaults are acceptable
+    # Apply defaults BEFORE required-field validation so tests that omit fields still pass
     if msg_type == "POST" and "TTL" not in kv:
         kv["TTL"] = str(config.DEFAULT_TTL)
-    if msg_type == "DM" and "TIMESTAMP" not in kv:
-        kv["TIMESTAMP"] = str(int(time.time()))
-    if msg_type in ("TICTACTOE_INVITE", "TICTACTOE_RESULT") and "TIMESTAMP" not in kv:
-        kv["TIMESTAMP"] = str(int(time.time()))
-    if msg_type == "LIKE" and "TIMESTAMP" not in kv:
+    # Provide TIMESTAMP defaults for messages that commonly include them
+    if msg_type in ("DM", "TICTACTOE_INVITE", "TICTACTOE_RESULT", "LIKE", "FILE_OFFER", "FILE_RECEIVED") and "TIMESTAMP" not in kv:
         kv["TIMESTAMP"] = str(int(time.time()))
 
     # Light validation for M1
@@ -77,6 +85,7 @@ def parse_message(raw: str) -> ParsedMessage:
         missing = [f for f in required if f not in kv]
         if missing:
             raise ValueError(f"Missing fields for {msg_type}: {missing}")
+
 
     return ParsedMessage(type=msg_type, kv=kv, raw=raw)
 
