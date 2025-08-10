@@ -19,6 +19,7 @@ def main(argv=None):
     sub.add_parser("run", help="Run node (broadcast profile, receive, print events)")
     p_post = sub.add_parser("post", help="Broadcast a post")
     p_post.add_argument("content")
+    p_post.add_argument("--ttl", type=int, help="Override TTL for POST (seconds)")
 
     p_show_cmd = sub.add_parser("show", help="Show peers/posts/dms once and exit")
     p_show_cmd.add_argument("what", choices=["peers", "posts", "dms"], help="What to show")
@@ -31,9 +32,13 @@ def main(argv=None):
     node = Node(user_id=user_id, display_name=display_name, status=args.status, verbose=not args.quiet)
 
     if args.cmd == "post":
+        ttl = int(args.ttl) if getattr(args, "ttl", None) else config.DEFAULT_TTL
+        expiry = int(time.time()) + int(ttl)
+        token = f"{user_id}|{expiry}|broadcast"
+
         node.start()
-        node.send_post(content=args.content, message_id=hex(int(time.time()*1000))[2:], token=f"{user_id}|{int(time.time())+config.DEFAULT_TTL}|broadcast")
-        print("Post sent. Listening for a bit...")
+        node.send_post(content=args.content, message_id=hex(int(time.time()*1000))[2:], token=token, ttl=ttl)
+        print(f"Post sent (TTL={ttl}s). Listening for a bit...")
         try:
             time.sleep(2)
         finally:
@@ -58,9 +63,9 @@ def main(argv=None):
         else:  # dms
             for m in node.state.list_dms():
                 print(f"- {m.user_id}: {m.content} [{m.message_id}]")
-    return 0
+        return 0
 
-    # default: run
+    # default: run (if args.cmd == "run" or no subcommand supplied)
     node.start()
     print("LSNP node running. Press Ctrl+C to stop.")
     try:
