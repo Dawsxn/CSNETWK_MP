@@ -61,6 +61,7 @@ class MessageRecord:
     content: str
     message_id: str
     timestamp: float
+    expires_at: float | None = None
 
 
 class LSNPState:
@@ -104,11 +105,31 @@ class LSNPState:
                 avatar=avatar
             )
 
-    def add_post(self, user_id: str, content: str, message_id: str):
-        self.posts.append(MessageRecord(type="POST", user_id=user_id, content=content, message_id=message_id, timestamp=time.time()))
+    def add_post(self, user_id: str, content: str, message_id: str, *, timestamp: float | None = None, expires_at: float | None = None):
+        ts = timestamp if timestamp is not None else time.time()
+        self.posts.append(
+            MessageRecord(
+                type="POST",
+                user_id=user_id,
+                content=content,
+                message_id=message_id,
+                timestamp=ts,
+                expires_at=expires_at,
+            )
+        )
 
-    def add_dm(self, user_id: str, content: str, message_id: str):
-        self.dms.append(MessageRecord(type="DM", user_id=user_id, content=content, message_id=message_id, timestamp=time.time()))
+    def add_dm(self, user_id: str, content: str, message_id: str, *, timestamp: float | None = None, expires_at: float | None = None):
+        ts = timestamp if timestamp is not None else time.time()
+        self.dms.append(
+            MessageRecord(
+                type="DM",
+                user_id=user_id,
+                content=content,
+                message_id=message_id,
+                timestamp=ts,
+                expires_at=expires_at,
+            )
+        )
 
     def list_peers(self):
         return list(self.peers.values())
@@ -118,6 +139,39 @@ class LSNPState:
 
     def list_dms(self):
         return list(self.dms)
+    
+    # Filtered views
+    def list_posts_by_user(self, user_id: str, *, only_valid: bool = True) -> List[MessageRecord]:
+        now = time.time()
+        out: List[MessageRecord] = []
+        for m in self.posts:
+            if m.user_id != user_id:
+                continue
+            if only_valid and m.expires_at is not None and m.expires_at < now:
+                continue
+            out.append(m)
+        return out
+
+    def list_dms_by_user(self, user_id: str, *, only_valid: bool = True) -> List[MessageRecord]:
+        now = time.time()
+        out: List[MessageRecord] = []
+        for m in self.dms:
+            if m.user_id != user_id:
+                continue
+            if only_valid and m.expires_at is not None and m.expires_at < now:
+                continue
+            out.append(m)
+        return out
+
+    def resolve_user_id(self, query: str) -> Optional[str]:
+        """Resolve a user by user_id or display_name (case-insensitive exact match)."""
+        if query in self.peers:
+            return query
+        qlower = query.lower()
+        for uid, peer in self.peers.items():
+            if peer.display_name.lower() == qlower:
+                return uid
+        return None
     
     def get_peer_avatar(self, user_id: str) -> Optional[AvatarData]:
         """Get avatar data for a specific peer"""

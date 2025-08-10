@@ -120,7 +120,14 @@ class Node:
                 self._log_verbose(f"          Avatar details: {avatar_type}, ~{avatar_size_kb}KB")
             
         elif t == "POST":
-            self.state.add_post(kv["USER_ID"], kv.get("CONTENT", ""), kv.get("MESSAGE_ID", ""))
+            # Determine expiry using TTL relative to now (no TIMESTAMP field defined for POST in RFC body)
+            try:
+                ttl = int(kv.get("TTL", str(config.DEFAULT_TTL)))
+            except ValueError:
+                ttl = config.DEFAULT_TTL
+            now_ts = time.time()
+            expires_at = now_ts + max(0, ttl)
+            self.state.add_post(kv["USER_ID"], kv.get("CONTENT", ""), kv.get("MESSAGE_ID", ""), timestamp=now_ts, expires_at=expires_at)
             peer = self.state.peers.get(kv["USER_ID"])
             if peer:
                 name_with_pfp = peer.display_name + (" [PFP]" if peer.has_avatar else "")
@@ -129,7 +136,21 @@ class Node:
             # Always show POST messages with PFP indicator
             self._log(f"[POST] {name_with_pfp}: {kv.get('CONTENT','')}")
         elif t == "DM":
-            self.state.add_dm(kv["FROM"], kv.get("CONTENT", ""), kv.get("MESSAGE_ID", ""))
+            # Use provided TIMESTAMP if present; compute expiry from token timestamp
+            try:
+                ts = float(kv.get("TIMESTAMP", str(int(time.time()))))
+            except ValueError:
+                ts = time.time()
+            token = kv.get("TOKEN", "")
+            expires_at = None
+            if token:
+                parts = token.split("|")
+                if len(parts) == 3:
+                    try:
+                        expires_at = float(parts[1])
+                    except ValueError:
+                        expires_at = None
+            self.state.add_dm(kv["FROM"], kv.get("CONTENT", ""), kv.get("MESSAGE_ID", ""), timestamp=ts, expires_at=expires_at)
             peer = self.state.peers.get(kv["FROM"])
             if peer:
                 name_with_pfp = peer.display_name + (" [PFP]" if peer.has_avatar else "")

@@ -86,7 +86,8 @@ def main(argv=None):
     p_unfollow.add_argument("to", help="Destination user_id or host/ip")
 
     p_show_cmd = sub.add_parser("show", help="Show peers/posts/dms once and exit")
-    p_show_cmd.add_argument("what", choices=["peers", "posts", "dms"], help="What to show")
+    p_show_cmd.add_argument("what", choices=["peers", "posts", "dms", "names", "user"], help="What to show")
+    p_show_cmd.add_argument("who", nargs="?", help="For 'user': user_id or display name to filter by")
 
     # Tic-tac-toe commands
     p_tictactoe = sub.add_parser("tictactoe", help="Tic-tac-toe game commands")
@@ -304,6 +305,13 @@ def main(argv=None):
                     print(f"- {p.display_name} ({p.user_id}) — {p.status}{pfp_indicator}")
             else:
                 print("No peers found.")
+        elif args.what == "names":
+            peers = node.state.list_peers()
+            if peers:
+                for p in peers:
+                    print(f"- {p.display_name}")
+            else:
+                print("No peers found.")
         elif args.what == "posts":
             posts = node.state.list_posts()
             if posts:
@@ -316,7 +324,7 @@ def main(argv=None):
                     print(f"- {name_with_pfp}: {m.content} [{m.message_id}]")
             else:
                 print("No posts found.")
-        else:  # dms
+        elif args.what == "dms":  # dms
             dms = node.state.list_dms()
             if dms:
                 for m in dms:
@@ -328,6 +336,31 @@ def main(argv=None):
                     print(f"- {name_with_pfp}: {m.content} [{m.message_id}]")
             else:
                 print("No DMs found.")
+        elif args.what == "user":
+            if not args.who:
+                print("Provide a user_id or display name: show user <who>")
+                return 1
+            target = node.state.resolve_user_id(args.who)
+            if not target:
+                print(f"No such peer: {args.who}")
+                return 1
+            peer = node.state.peers.get(target)
+            header_name = peer.display_name if peer else target
+            print(f"Messages for {header_name} ({target}):")
+            posts = node.state.list_posts_by_user(target, only_valid=True)
+            dms = node.state.list_dms_by_user(target, only_valid=True)
+            if posts:
+                print("- Posts:")
+                for m in posts:
+                    print(f"  • {m.content} [{m.message_id}]")
+            else:
+                print("- Posts: none")
+            if dms:
+                print("- DMs:")
+                for m in dms:
+                    print(f"  • {m.content} [{m.message_id}]")
+            else:
+                print("- DMs: none")
         return 0
 
     # default: run (if args.cmd == "run" or no subcommand supplied)
