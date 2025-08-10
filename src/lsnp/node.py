@@ -39,8 +39,25 @@ class Node:
         self.udp.stop()
 
     def _log(self, msg: str):
+        """Always log - for important messages that should show even in quiet mode"""
+        print(msg)
+
+    def _log_verbose(self, msg: str):
+        """Only log in verbose mode"""
         if self.verbose:
             print(msg)
+
+    def _log_verbose_message(self, pm: messages.ParsedMessage):
+        """Log the full message details in verbose mode"""
+        if self.verbose:
+            # Format the message in a readable way, showing all fields
+            formatted_msg = []
+            for key, value in pm.kv.items():
+                formatted_msg.append(f"{key}: {value}")
+            
+            full_msg = "\n".join(formatted_msg)
+            print(f"[RECEIVED] Full message:\n{full_msg}")
+            print("-" * 40)  # separator line
 
     def _on_udp(self, data: bytes, addr: Tuple[str, int]):
         try:
@@ -57,19 +74,28 @@ class Node:
     def _handle(self, pm: messages.ParsedMessage):
         kv = pm.kv
         t = pm.type
+        
+        # Show full message details in verbose mode
+        if self.verbose:
+            self._log_verbose_message(pm)
+        
         if t == "PROFILE":
             self.state.update_peer(kv["USER_ID"], kv.get("DISPLAY_NAME", kv["USER_ID"]), kv.get("STATUS", ""))
-            self._log(f"[PROFILE] {kv.get('DISPLAY_NAME', kv['USER_ID'])}: {kv.get('STATUS','')}")
+            # Only show PROFILE messages in verbose mode
+            self._log_verbose(f"[PROFILE] {kv.get('DISPLAY_NAME', kv['USER_ID'])}: {kv.get('STATUS','')}")
         elif t == "POST":
             self.state.add_post(kv["USER_ID"], kv.get("CONTENT", ""), kv.get("MESSAGE_ID", ""))
             name = self.state.peers.get(kv["USER_ID"], store.Peer(kv["USER_ID"], kv["USER_ID"]))
+            # Always show POST messages
             self._log(f"[POST] {name.display_name}: {kv.get('CONTENT','')}")
         elif t == "DM":
             self.state.add_dm(kv["FROM"], kv.get("CONTENT", ""), kv.get("MESSAGE_ID", ""))
             name = self.state.peers.get(kv["FROM"], store.Peer(kv["FROM"], kv["FROM"]))
+            # Always show DM messages
             self._log(f"[DM] {name.display_name}: {kv.get('CONTENT','')}")
         elif t == "PING":
-            # do not print; reply with PROFILE to the sender host (unicast)
+            # Only show in verbose mode; reply with PROFILE to the sender host (unicast)
+            self._log_verbose(f"[PING] from {kv.get('USER_ID', 'unknown')}")
             try:
                 host = pm.addr[0] if pm.addr else None
                 if host:
@@ -77,13 +103,14 @@ class Node:
             except Exception:
                 pass
         elif t == "ACK":
-            pass
+            self._log_verbose(f"[ACK] {kv.get('MESSAGE_ID', 'unknown')} - {kv.get('STATUS', 'unknown')}")
         elif t in ("FOLLOW", "UNFOLLOW"):
             actor = kv.get("FROM", "")
             verb = "followed" if t == "FOLLOW" else "unfollowed"
+            # Always show FOLLOW/UNFOLLOW messages
             self._log(f"[INFO] User {actor} has {verb} you")
         else:
-            self._log(f"[UNKNOWN] {t}")
+            self._log_verbose(f"[UNKNOWN] {t}")
 
     # --- sending helpers ---
     def broadcast_profile(self):
