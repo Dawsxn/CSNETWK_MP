@@ -170,3 +170,7 @@ python -m unittest -v
 - If peers aren’t discovered: ensure UDP 50999 is open in firewall; try running show peers --wait 5.
 - If likes or posts don’t appear: ensure you’re following the author or viewing your own posts; tokens must be unexpired.
 - For file transfer on the same host, prefer unicast to 127.0.0.1 or user@127.0.0.1; large files will be chunked.
+
+## AI usage policy
+
+GitHub Copilot was used to guide and help during the development process. All code included in this repository was reviewed, verified, and tested by the group before submission.
